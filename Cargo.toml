@@ -1,0 +1,18 @@
+[package]
+name = "circom_lsp"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+tower-lsp = "0.18.0"
+tokio = { version = "1", features = ["full"] }
+serde_json = "1.0.93"
+tower = "0.4.13"
+# not importing lalrpop-util with lexer feature causes issues with circom import
+# not sure why it couldn't download the feautre automatically as it is specified
+lalrpop-util = {version = "0.18.1", features = ["lexer"]}
+circom = { git = "https://github.com/iden3/circom", package = "parser" }
+dashmap = "5.4.0"
+ropey = "1.6.0"

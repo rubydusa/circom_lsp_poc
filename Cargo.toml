@@ -6,13 +6,16 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-tower-lsp = "0.18.0"
-tokio = { version = "1", features = ["full"] }
-serde_json = "1.0.93"
-tower = "0.4.13"
-# not importing lalrpop-util with lexer feature causes issues with circom import
-# not sure why it couldn't download the feautre automatically as it is specified
-lalrpop-util = {version = "0.18.1", features = ["lexer"]}
-circom = { git = "https://github.com/iden3/circom", package = "parser" }
+tower-lsp = "0.19.0"
+
+# lalrpop-util in this specific version required for circom parser to work 
+lalrpop-util = { version = "0.18.1", features = ["lexer"] }
+# circom = { git = "https://github.com/iden3/circom", package = "parser" }
+circom_parser = { git = "https://github.com/rubydusa/circom", package = "parser" }
+circom_type_checker = { git = "https://github.com/rubydusa/circom", package = "type_analysis" }
+circom_structure = { git = "https://github.com/rubydusa/circom", package = "program_structure" }
 dashmap = "5.4.0"
 ropey = "1.6.0"
+tokio = { version = "1.26.0", features = ["rt-multi-thread", "macros", "io-std"] }
+codespan-reporting = "0.9.0"
+

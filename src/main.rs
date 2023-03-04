@@ -6,6 +6,7 @@ use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer, LspService, Server};
 
 use codespan_reporting::diagnostic::{Severity, LabelStyle};
+use circom_structure::error_definition::Report;
 
 #[derive(Debug)]
 struct Backend {
@@ -18,6 +19,68 @@ impl Backend {
         Backend { 
             client,
             rope: Mutex::new(RefCell::new(Rope::from_str(""))), 
+        }
+    }
+
+    fn report_to_diagnostic(rope: &Rope, report: Report) -> Diagnostic {
+        let diagnostic = report.to_diagnostic();
+
+        let label = diagnostic.labels.into_iter().reduce(|cur, a| {
+            match (cur.style, a.style) {
+                (LabelStyle::Primary, LabelStyle::Secondary) => cur,
+                (LabelStyle::Secondary, LabelStyle::Primary) => a,
+                _ => if cur.range.start < a.range.start {
+                    cur
+                } else {
+                    a
+                }
+            }
+        });
+
+        let range = match label {
+            Some(label) => Range {
+                start: Self::char_to_position(rope, label.range.start),
+                end: Self::char_to_position(rope, label.range.end)
+            },
+            None => Range {
+                start: Position { line: 0, character: 0 },
+                end: Position { line: 0, character: 0 }
+            }
+        };
+
+        let severity = match diagnostic.severity {
+            Severity::Bug | Severity::Error => DiagnosticSeverity::ERROR,
+            Severity::Warning => DiagnosticSeverity::WARNING,
+            Severity::Help => DiagnosticSeverity::HINT,
+            Severity::Note => DiagnosticSeverity::INFORMATION
+        };
+
+        let message = diagnostic.message;
+
+        Diagnostic {
+            range,
+            severity: Some(severity),
+            code: None,
+            code_description: None,
+            source: Some(String::from("circom_lsp")),
+            message,
+            related_information: None,
+            tags: None,
+            data: None
+        }
+    }
+
+    fn char_to_position(rope: &Rope, idx: usize) -> Position {
+        let line = rope.char_to_line(idx);
+        let line_start = rope.line_to_char(line);
+        let character = idx - line_start;
+
+        let line = u32::try_from(line).unwrap();
+        let character = u32::try_from(character).unwrap();
+
+        Position {
+            line,
+            character
         }
     }
 }
@@ -61,7 +124,7 @@ impl LanguageServer for Backend {
     }
 
     async fn did_save(&self, params: DidSaveTextDocumentParams) {
-        let reports = {
+        let diagnostics = {
             let file = params.text_document.uri
                 .to_file_path()
                 .expect("Invalid text document URI")
@@ -69,7 +132,7 @@ impl LanguageServer for Backend {
                 .into_string()
                 .expect("Invalid text document URI");
 
-            match circom_parser::run_parser(file, "2.1.4", vec![]) {
+            let reports = match circom_parser::run_parser(file, "2.1.4", vec![]) {
                 Ok((mut archive, mut reports)) => {
                     let mut type_reports = match circom_type_checker::check_types::check_types(&mut archive) {
                         Ok(type_reports) => type_reports,
@@ -79,55 +142,16 @@ impl LanguageServer for Backend {
                     reports
                 },
                 Err((_, reports)) => reports
-            }
-        };
+            };
 
-        self.client
-            .log_message(MessageType::INFO, format!("reports: {:?}", reports
-                                                    .clone()
-                                                    .into_iter()
-                                                    .map(|x| x.to_diagnostic()).collect::<Vec<_>>()))
-                .await;
-
-        let diagnostics = {
-            /*
             let rope = self.rope.lock().unwrap();
             let rope = rope.borrow().clone();
 
-            match lang::ParseAstParser::new().parse(&rope.clone().to_string()) {
-                Err(parse_error) => {
-                    let (start, end, message) = match parse_error {
-                        ParseError::InvalidToken { location } => (
-                            location, 
-                            location, 
-                            String::from("Invalid token")
-                        ),
-                        ParseError::UnrecognizedToken { ref token, .. } => (
-                            token.0, 
-                            token.2, 
-                            format!("Unrecognized token: \"{}\"", token.2)
-                        ),
-                        ParseError::ExtraToken { ref token, .. } => (
-                            token.0, 
-                            token.2, 
-                            format!("Extra token: \"{:?}\"", token.2)
-                        ),
-                        _ => (0, 0, String::from("A grammar error occured"))
-                    };
-
-                    Some(build_diagnostic(&rope, message, start, end))
-                },
-                _ => None
-            }
-            */
-            let rope = self.rope.lock().unwrap();
-            let rope = rope.borrow().clone();
-
-            reports.into_iter().filter_map(|x| report_to_diagnostic(&rope, x)).collect()
+            reports.into_iter().map(|x| Self::report_to_diagnostic(&rope, x)).collect()
         };
 
         self.client
-            .log_message(MessageType::INFO, format!("diagnostics: {:?}", diagnostics))
+            .log_message(MessageType::INFO, format!("Diagnostics: {:?}", diagnostics))
             .await;
 
         self.client
@@ -136,82 +160,6 @@ impl LanguageServer for Backend {
                 diagnostics,
                 None
             ).await;
-    }
-}
-
-fn report_to_diagnostic(rope: &Rope, report: circom_structure::error_definition::Report) -> Option<Diagnostic> {
-    let diagnostic = report.to_diagnostic();
-
-    let label = diagnostic.labels.into_iter().reduce(|cur, a| {
-        match (cur.style, a.style) {
-            (LabelStyle::Primary, LabelStyle::Secondary) => cur,
-            (LabelStyle::Secondary, LabelStyle::Primary) => a,
-            _ => if cur.range.start < a.range.start {
-                cur
-            } else {
-                a
-            }
-        }
-    })?;
-
-    let range = Range {
-        start: char_to_position(rope, label.range.start),
-        end: char_to_position(rope, label.range.end)
-    };
-
-    let severity = match diagnostic.severity {
-        Severity::Bug | Severity::Error => DiagnosticSeverity::ERROR,
-        Severity::Warning => DiagnosticSeverity::WARNING,
-        Severity::Help => DiagnosticSeverity::HINT,
-        Severity::Note => DiagnosticSeverity::INFORMATION
-    };
-
-    let message = diagnostic.message;
-
-    Some(Diagnostic {
-        range,
-        severity: Some(severity),
-        code: None,
-        code_description: None,
-        source: Some(String::from("circom_lsp")),
-        message,
-        related_information: None,
-        tags: None,
-        data: None
-    })
-}
-/*
-fn build_diagnostic(rope: &Rope, message: String, start: usize, end: usize) -> Diagnostic {
-    let range = Range {
-        start: char_to_position(rope, start),
-        end: char_to_position(rope, end)
-    };
-
-    Diagnostic {
-        range,
-        severity: Some(DiagnosticSeverity::ERROR),
-        code: Some(NumberOrString::Number(0)),
-        code_description: None,
-        source: Some(String::from("circom_lsp")),
-        message,
-        related_information: None,
-        tags: None,
-        data: None
-    }
-}
-*/
-
-fn char_to_position(rope: &Rope, idx: usize) -> Position {
-    let line = rope.char_to_line(idx);
-    let line_start = rope.line_to_char(line);
-    let character = idx - line_start;
-
-    let line = u32::try_from(line).unwrap();
-    let character = u32::try_from(character).unwrap();
-
-    Position {
-        line,
-        character
     }
 }
 

@@ -1,5 +1,3 @@
-use std::cell::RefCell;
-use std::sync::Mutex;
 use ropey::Rope;
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
@@ -8,20 +6,93 @@ use tower_lsp::{Client, LanguageServer, LspService, Server};
 use codespan_reporting::diagnostic::{Severity, LabelStyle};
 use circom_structure::error_definition::Report;
 
+use std::path::PathBuf;
+use std::collections::HashMap;
+use std::cell::RefCell;
+use std::sync::Mutex;
+
+struct TextDocumentItem {
+    uri: Url,
+    text: String,
+    version: Option<i32>,
+}
+
 #[derive(Debug)]
 struct Backend {
     client: Client,
-    rope: Mutex<RefCell<Rope>>,
+    document_map: Mutex<RefCell<HashMap<Url, Rope>>>,
 }
 
 impl Backend {
     fn new(client: Client) -> Backend { 
         Backend { 
             client,
-            rope: Mutex::new(RefCell::new(Rope::from_str(""))), 
+            document_map: Mutex::new(RefCell::new(HashMap::new()))
         }
     }
 
+    async fn debug(&self, message: &str) {
+        self.client
+            .log_message(MessageType::ERROR, message)
+            .await;
+    }
+
+    async fn on_change(&self, params: TextDocumentItem, publish_diagnostics: bool) {
+        self.debug("on_change").await;
+        let path = url_to_string(&params.uri);
+        let rope = Rope::from_str(&params.text);
+
+        if publish_diagnostics {
+            let diagnostics: Vec<_> = {
+                self.debug("computing cache").await;
+                let cache = {
+                    let document_map = self.document_map.lock().unwrap();
+                    let document_map = document_map.borrow();
+                    document_map_to_cache(&document_map)
+                };
+                // let cache = HashMap::new();
+
+                self.debug("computing reports").await;
+                let reports = match circom_parser::run_parser_cached(
+                    path, 
+                    "2.1.4", 
+                    vec![], 
+                    cache, 
+                    true
+                ) {
+                    Ok((mut archive, mut reports)) => {
+                        let mut type_reports = match circom_type_checker::check_types::check_types(&mut archive) {
+                            Ok(type_reports) => type_reports,
+                            Err(type_reports) => type_reports
+                        };
+                        reports.append(&mut type_reports);
+                        reports
+                    },
+                    Err((_, reports)) => reports
+                };
+
+                self.debug("convert reports to diagnostics").await;
+                reports
+                    .into_iter()
+                    .map(|x| Self::report_to_diagnostic(&rope, x))
+                    .collect()
+            };
+
+            self.debug(&format!("{:?}", diagnostics)).await;
+
+            self.client
+                .publish_diagnostics(params.uri.clone(), diagnostics, params.version)
+                .await;
+
+            self.debug("doesn't reach as far as I understand").await;
+        }
+
+        self.debug("document insertion").await;
+        let document_map = self.document_map.lock().unwrap();
+        document_map.borrow_mut().insert(params.uri, rope);
+    }
+
+    // convert circom report to a lsp diagnostic
     fn report_to_diagnostic(rope: &Rope, report: Report) -> Diagnostic {
         let diagnostic = report.to_diagnostic();
 
@@ -39,8 +110,8 @@ impl Backend {
 
         let range = match label {
             Some(label) => Range {
-                start: Self::char_to_position(rope, label.range.start),
-                end: Self::char_to_position(rope, label.range.end)
+                start: char_to_position(rope, label.range.start),
+                end: char_to_position(rope, label.range.end)
             },
             None => Range {
                 start: Position { line: 0, character: 0 },
@@ -67,20 +138,6 @@ impl Backend {
             related_information: None,
             tags: None,
             data: None
-        }
-    }
-
-    fn char_to_position(rope: &Rope, idx: usize) -> Position {
-        let line = rope.char_to_line(idx);
-        let line_start = rope.line_to_char(line);
-        let character = idx - line_start;
-
-        let line = u32::try_from(line).unwrap();
-        let character = u32::try_from(character).unwrap();
-
-        Position {
-            line,
-            character
         }
     }
 }
@@ -114,53 +171,81 @@ impl LanguageServer for Backend {
             .log_message(MessageType::INFO, "Opened!")
             .await;
 
-        let rope = self.rope.lock().unwrap();
-        rope.replace(Rope::from_str(&params.text_document.text));
+        self.on_change(
+            TextDocumentItem { 
+                uri: params.text_document.uri,
+                text: params.text_document.text,
+                version: Some(params.text_document.version)
+            },
+            false
+        ).await;
     }
 
     async fn did_change(&self, params: DidChangeTextDocumentParams) {
-        let rope = self.rope.lock().unwrap();
-        rope.replace(Rope::from_str(&params.content_changes[0].text));
+        self.debug("did change").await;
+        self.on_change(
+            TextDocumentItem {
+                uri: params.text_document.uri,
+                text: params.content_changes[0].text.clone(),
+                version: Some(params.text_document.version)
+            },
+            false
+        ).await;
     }
 
     async fn did_save(&self, params: DidSaveTextDocumentParams) {
-        let diagnostics = {
-            let file = params.text_document.uri
-                .to_file_path()
-                .expect("Invalid text document URI")
-                .into_os_string()
-                .into_string()
-                .expect("Invalid text document URI");
-
-            let reports = match circom_parser::run_parser(file, "2.1.4", vec![]) {
-                Ok((mut archive, mut reports)) => {
-                    let mut type_reports = match circom_type_checker::check_types::check_types(&mut archive) {
-                        Ok(type_reports) => type_reports,
-                        Err(type_reports) => type_reports
-                    };
-                    reports.append(&mut type_reports);
-                    reports
-                },
-                Err((_, reports)) => reports
-            };
-
-            let rope = self.rope.lock().unwrap();
-            let rope = rope.borrow().clone();
-
-            reports.into_iter().map(|x| Self::report_to_diagnostic(&rope, x)).collect()
+        self.debug("did save").await;
+        let result = {
+            let document_map = self.document_map.lock().unwrap();
+            let document_map = document_map.borrow();
+            document_map.get(&params.text_document.uri).map(|x| x.to_string())
         };
 
-        self.client
-            .log_message(MessageType::INFO, format!("Diagnostics: {:?}", diagnostics))
-            .await;
-
-        self.client
-            .publish_diagnostics(
-                params.text_document.uri, 
-                diagnostics,
-                None
-            ).await;
+        match result {
+            Some(document) => {
+                self.on_change(
+                    TextDocumentItem {
+                        uri: params.text_document.uri,
+                        text: document,
+                        version: None
+                    },
+                    true
+                ).await;
+            },
+            None => self.debug("could not find document").await
+        };
     }
+}
+
+fn char_to_position(rope: &Rope, idx: usize) -> Position {
+    let line = rope.char_to_line(idx);
+    let line_start = rope.line_to_char(line);
+    let character = idx - line_start;
+
+    let line = u32::try_from(line).unwrap();
+    let character = u32::try_from(character).unwrap();
+
+    Position {
+        line,
+        character
+    }
+}
+
+fn document_map_to_cache(document_map: &HashMap<Url, Rope>) -> HashMap<PathBuf, String> {
+    document_map.iter().map(|(file_uri, document)| {
+        let (path, content) = (PathBuf::from(url_to_string(&file_uri)), document.to_string());
+
+        (path, content)
+    }).collect()
+}
+
+fn url_to_string(url: &Url) -> String {
+    url
+        .to_file_path()
+        .expect("Invalid text document URI")
+        .into_os_string()
+        .into_string()
+        .expect("Invalid text document URI")
 }
 
 #[tokio::main]
@@ -172,4 +257,3 @@ async fn main() {
 
     Server::new(stdin, stdout, socket).serve(service).await;
 }
-

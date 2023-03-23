@@ -14,7 +14,6 @@ lalrpop-util = { version = "0.18.1", features = ["lexer"] }
 circom_parser = { git = "https://github.com/rubydusa/circom", package = "parser" }
 circom_type_checker = { git = "https://github.com/rubydusa/circom", package = "type_analysis" }
 circom_structure = { git = "https://github.com/rubydusa/circom", package = "program_structure" }
-dashmap = "5.4.0"
 ropey = "1.6.0"
 tokio = { version = "1.26.0", features = ["rt-multi-thread", "macros", "io-std"] }
 codespan-reporting = "0.9.0"

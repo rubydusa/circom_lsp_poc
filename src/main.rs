@@ -6,6 +6,7 @@ use tower_lsp::{Client, LanguageServer, LspService, Server};
 use codespan_reporting::diagnostic::{Severity, LabelStyle};
 use circom_structure::error_definition::Report;
 
+use std::fmt;
 use std::sync::Mutex;
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -16,26 +17,54 @@ struct TextDocumentItem {
     version: Option<i32>,
 }
 
+// circom's program archive doesn't implement debug
+struct ProgramArchive {
+    inner: circom_structure::program_archive::ProgramArchive
+}
+
+impl ProgramArchive {
+    pub fn new(inner: circom_structure::program_archive::ProgramArchive) -> ProgramArchive {
+        ProgramArchive {
+            inner
+        }
+    }
+}
+
+impl fmt::Debug for ProgramArchive {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ProgramArchive")
+         .finish()
+    }
+}
+
+#[derive(Debug)]
+struct DocumentData {
+    content: Rope,
+    archive: Option<ProgramArchive>,
+}
+
 #[derive(Debug)]
 struct Backend {
     client: Client,
-    document_map: Mutex<RefCell<HashMap<Url, Rope>>>
+    document_map: Mutex<RefCell<HashMap<Url, DocumentData>>>,
 }
 
 impl Backend {
     fn new(client: Client) -> Backend { 
         Backend { 
             client,
-            document_map: Mutex::new(RefCell::new(HashMap::new()))
+            document_map: Mutex::new(RefCell::new(HashMap::new())),
         }
     }
 
-    async fn on_change(&self, params: TextDocumentItem) {
-        let path = url_to_string(&params.uri);
+    async fn on_change(&self, params: TextDocumentItem, publish_diagnostics: bool) {
+        let path = uri_to_string(&params.uri);
         let rope = Rope::from_str(&params.text);
 
-        let diagnostics: Vec<_> = {
-            let reports = match circom_parser::run_parser(
+        // do not compute archive if publish_diagnostics flag is not set, this
+        // is done to prevent from tons of calls to the circom compiler
+        let archive = if publish_diagnostics {
+            let (reports, archive) = match circom_parser::run_parser(
                 path, 
                 "2.1.4", 
                 vec![], 
@@ -46,27 +75,46 @@ impl Backend {
                         Err(type_reports) => type_reports
                     };
                     reports.append(&mut type_reports);
-                    reports
+                    (reports, Some(ProgramArchive::new(archive)))
                 },
-                Err((_, reports)) => reports
+                Err((_, reports)) => (reports, None)
             };
 
-            reports
+            let diagnostics = reports
                 .into_iter()
                 .filter_map(|x| Self::report_to_diagnostic(&rope, x).ok())
-                .collect()
+                .collect();
+
+            self.client
+                .publish_diagnostics(params.uri.clone(), diagnostics, params.version)
+                .await;
+
+            archive
+        } else {
+            None
         };
 
-        self.client
-            .publish_diagnostics(params.uri.clone(), diagnostics, params.version)
-            .await;
 
         let document_map = self.document_map.lock().unwrap();
-        document_map.borrow_mut().insert(params.uri, rope);
+        // if new archive computed succesfully, insert it.
+        // otherwise, use old archive
+        let archive = match archive {
+            Some(new_archive) => Some(new_archive),
+            None => match document_map.borrow_mut().remove(&params.uri).map(|x| x.archive) {
+                Some(existing_archive) => existing_archive,
+                None => None
+            }
+        };
+
+        let document = DocumentData {
+            content: rope,
+            archive
+        };
+
+        document_map.borrow_mut().insert(params.uri, document);
     }
 
     // convert circom report to a lsp diagnostic
-    // can only fail on label ranges, that's
     fn report_to_diagnostic(rope: &Rope, report: Report) -> ropey::Result<Diagnostic> {
         let diagnostic = report.to_diagnostic();
 
@@ -124,6 +172,7 @@ impl LanguageServer for Backend {
                 text_document_sync: Some(TextDocumentSyncCapability::Kind(
                     TextDocumentSyncKind::FULL,
                 )),
+                hover_provider: Some(HoverProviderCapability::Simple(true)),
                 ..Default::default()
             },
             ..Default::default()
@@ -150,7 +199,19 @@ impl LanguageServer for Backend {
                 uri: params.text_document.uri,
                 text: params.text_document.text,
                 version: Some(params.text_document.version)
-            }
+            },
+            true
+        ).await;
+    }
+
+    async fn did_change(&self, params: DidChangeTextDocumentParams) {
+        self.on_change(
+            TextDocumentItem {
+                uri: params.text_document.uri,
+                text: params.content_changes[0].text.clone(),
+                version: Some(params.text_document.version)
+            },
+            false
         ).await;
     }
 
@@ -158,7 +219,7 @@ impl LanguageServer for Backend {
         let result = {
             let document_map = self.document_map.lock().unwrap();
             let document_map = document_map.borrow();
-            document_map.get(&params.text_document.uri).map(|x| x.to_string())
+            document_map.get(&params.text_document.uri).map(|x| x.content.to_string())
         };
 
         match result {
@@ -168,12 +229,70 @@ impl LanguageServer for Backend {
                         uri: params.text_document.uri,
                         text: document,
                         version: None
-                    }
+                    },
+                    true
                 ).await;
             },
             None => ()
         };
     }
+
+    async fn hover(&self, params: HoverParams) -> jsonrpc::Result<Option<Hover>> {
+        let uri = params.text_document_position_params.text_document.uri;
+        let document_map = self.document_map.lock().unwrap();
+        let document_map = document_map.borrow();
+        let document_data = document_map.get(&uri).expect("document map should have uri on hover");
+
+        Ok(match find_word(&document_data.content, params.text_document_position_params.position) {
+            Ok(result) => result.map(|x| Hover {
+                contents: HoverContents::Scalar(MarkedString::String(x)),
+                range: None
+            }),
+            _ => None, // error means out of range position for rope, ignore case
+        })
+    }
+}
+
+fn find_word(rope: &Rope, position: Position) -> ropey::Result<Option<String>> {
+    let char_idx = position_to_char(rope, position)?;
+    let char = rope.get_char(char_idx)
+        .expect("char_idx should not be out of range since position_to_char guarantees");
+
+    if char.is_alphanumeric() {
+        let start = 'start: loop {
+            let mut i = char_idx;
+            for c in rope.chars_at(char_idx).reversed() {
+                if !c.is_alphanumeric() {
+                    break 'start i;
+                }
+                i -= 1;
+            }
+            break i;
+        };
+        let end = 'end: loop {
+            let mut i = char_idx;
+            for c in rope.chars_at(char_idx) {
+                if !c.is_alphanumeric() {
+                    break 'end i;
+                }
+                i += 1;
+            }
+            break i;
+        };
+
+        Ok(Some(rope.slice(start..end).to_string()))
+    } else {
+        Ok(None)
+    }
+}
+
+fn position_to_char(rope: &Rope, position: Position) -> ropey::Result<usize> {
+    let line_start = rope.try_line_to_char(usize::try_from(position.line).unwrap())?;
+    let char = line_start + usize::try_from(position.character).unwrap();
+
+    // ensure resulting character is in bounds
+    rope.try_char_to_byte(char)?;
+    Ok(char)
 }
 
 fn char_to_position(rope: &Rope, idx: usize) -> ropey::Result<Position> {
@@ -190,8 +309,8 @@ fn char_to_position(rope: &Rope, idx: usize) -> ropey::Result<Position> {
     })
 }
 
-fn url_to_string(url: &Url) -> String {
-    url
+fn uri_to_string(uri: &Url) -> String {
+    uri
         .to_file_path()
         .expect("Invalid text document URI")
         .into_os_string()

@@ -63,6 +63,8 @@ impl Backend {
 
         // do not compute archive if publish_diagnostics flag is not set, this
         // is done to prevent from tons of calls to the circom compiler
+        let mut success = false;
+        let mut diagnostics_amount = 0;
         let archive = if publish_diagnostics {
             let (reports, archive) = match circom_parser::run_parser(
                 path, 
@@ -75,15 +77,18 @@ impl Backend {
                         Err(type_reports) => type_reports
                     };
                     reports.append(&mut type_reports);
+                    success = true;
                     (reports, Some(ProgramArchive::new(archive)))
                 },
                 Err((_, reports)) => (reports, None)
             };
 
-            let diagnostics = reports
+            let diagnostics: Vec<_> = reports
                 .into_iter()
                 .filter_map(|x| Self::report_to_diagnostic(&rope, x).ok())
                 .collect();
+
+            diagnostics_amount = diagnostics.len();
 
             self.client
                 .publish_diagnostics(params.uri.clone(), diagnostics, params.version)
@@ -94,6 +99,17 @@ impl Backend {
             None
         };
 
+        self.client
+            .log_message(
+                MessageType::ERROR, 
+                format!(
+                    "is publish_diagnostics: {}, diagnostics_amount: {}, is success: {}, is archive None: {}", 
+                    publish_diagnostics,
+                    diagnostics_amount,
+                    success,
+                    archive.is_none()
+                )
+            ).await;
 
         let document_map = self.document_map.lock().unwrap();
         // if new archive computed succesfully, insert it.
@@ -243,13 +259,37 @@ impl LanguageServer for Backend {
         let document_map = document_map.borrow();
         let document_data = document_map.get(&uri).expect("document map should have uri on hover");
 
-        Ok(match find_word(&document_data.content, params.text_document_position_params.position) {
-            Ok(result) => result.map(|x| Hover {
-                contents: HoverContents::Scalar(MarkedString::String(x)),
+        let Ok(Some(word)) = find_word(&document_data.content, params.text_document_position_params.position) else {
+            return Ok(Some(Hover {
+                contents: HoverContents::Scalar(MarkedString::String(String::from("could not find word"))),
                 range: None
-            }),
-            _ => None, // error means out of range position for rope, ignore case
-        })
+            }));
+            // return Ok(None);
+        };
+
+        let Some(archive) = &document_data.archive else {
+            return Ok(Some(Hover {
+                contents: HoverContents::Scalar(MarkedString::String(String::from("could not find archive"))),
+                range: None
+            }));
+        };
+
+        if let Some(_template_data) = archive.inner.templates.keys().find(|x| x == &&word) {
+            Ok(Some(Hover {
+                contents: HoverContents::Scalar(MarkedString::String(String::from("template"))),
+                range: None
+            }))
+        } else if let Some(_function_data) = archive.inner.functions.keys().find(|x| x == &&word) {
+            Ok(Some(Hover {
+                contents: HoverContents::Scalar(MarkedString::String(String::from("function"))),
+                range: None
+            }))
+        } else {
+            Ok(Some(Hover {
+                contents: HoverContents::Scalar(MarkedString::String(word)),
+                range: None
+            }))
+        }
     }
 }
 

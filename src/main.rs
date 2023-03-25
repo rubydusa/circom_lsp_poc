@@ -5,11 +5,17 @@ use tower_lsp::{Client, LanguageServer, LspService, Server};
 
 use codespan_reporting::diagnostic::{Severity, LabelStyle};
 use circom_structure::error_definition::Report;
+use circom_structure::file_definition::FileLibrary;
 
 use std::fmt;
 use std::sync::Mutex;
 use std::cell::RefCell;
 use std::collections::HashMap;
+
+enum FileLibrarySource {
+    ProgramArchive(ProgramArchive),
+    FileLibrary(FileLibrary)
+}
 
 struct TextDocumentItem {
     uri: Url,
@@ -21,7 +27,6 @@ struct TextDocumentItem {
 struct ProgramArchive {
     inner: circom_structure::program_archive::ProgramArchive
 }
-
 impl ProgramArchive {
     pub fn new(inner: circom_structure::program_archive::ProgramArchive) -> ProgramArchive {
         ProgramArchive {
@@ -63,12 +68,10 @@ impl Backend {
 
         // do not compute archive if publish_diagnostics flag is not set, this
         // is done to prevent from tons of calls to the circom compiler
-        let mut success = false;
-        let mut diagnostics_amount = 0;
         let archive = if publish_diagnostics {
-            let (reports, archive) = match circom_parser::run_parser(
+            let (reports, file_library_source) = match circom_parser::run_parser(
                 path, 
-                "2.1.4", 
+                "2.1.5", 
                 vec![], 
             ) {
                 Ok((mut archive, mut reports)) => {
@@ -77,39 +80,57 @@ impl Backend {
                         Err(type_reports) => type_reports
                     };
                     reports.append(&mut type_reports);
-                    success = true;
-                    (reports, Some(ProgramArchive::new(archive)))
+                    (reports, FileLibrarySource::ProgramArchive(ProgramArchive::new(archive)))
                 },
-                Err((_, reports)) => (reports, None)
+                Err((file_library, reports)) => (reports, FileLibrarySource::FileLibrary(file_library))
+            };
+
+            let file_library = match &file_library_source {
+                FileLibrarySource::ProgramArchive(archive) => &archive.inner.file_library,
+                FileLibrarySource::FileLibrary(file_library) => &file_library
             };
 
             let diagnostics: Vec<_> = reports
                 .into_iter()
-                .filter_map(|x| Self::report_to_diagnostic(&rope, x).ok())
+                .map(|x| Self::report_to_diagnostic(x, &file_library, &params.uri))
                 .collect();
 
-            diagnostics_amount = diagnostics.len();
+            let mut main_file_diags = Vec::new();
+            let mut other_files_diags: HashMap<_, Vec<_>> = HashMap::new();
 
+            for (diagnostic, uri) in diagnostics {
+                if uri == params.uri {
+                    main_file_diags.push(diagnostic);
+                } else if other_files_diags.contains_key(&uri) {
+                    other_files_diags.get_mut(&uri).expect("other files diag contains_key").push(diagnostic);
+                } else {
+                    other_files_diags.insert(uri, vec![diagnostic]);
+                }
+            }
+
+            if let Some(other_files_error) = Self::other_files_diagnostic(&other_files_diags) {
+                main_file_diags.push(other_files_error);
+            };
+
+            // publish main errors
             self.client
-                .publish_diagnostics(params.uri.clone(), diagnostics, params.version)
+                .publish_diagnostics(params.uri.clone(), main_file_diags, params.version)
                 .await;
 
-            archive
+            // publish errors in other files
+            for (uri, diags) in other_files_diags {
+                self.client
+                    .publish_diagnostics(uri, diags, params.version)
+                    .await;
+            }
+
+            match file_library_source {
+                FileLibrarySource::ProgramArchive(x) => Some(x),
+                _ => None
+            }
         } else {
             None
         };
-
-        self.client
-            .log_message(
-                MessageType::ERROR, 
-                format!(
-                    "is publish_diagnostics: {}, diagnostics_amount: {}, is success: {}, is archive None: {}", 
-                    publish_diagnostics,
-                    diagnostics_amount,
-                    success,
-                    archive.is_none()
-                )
-            ).await;
 
         let document_map = self.document_map.lock().unwrap();
         // if new archive computed succesfully, insert it.
@@ -130,8 +151,7 @@ impl Backend {
         document_map.borrow_mut().insert(params.uri, document);
     }
 
-    // convert circom report to a lsp diagnostic
-    fn report_to_diagnostic(rope: &Rope, report: Report) -> ropey::Result<Diagnostic> {
+    fn report_to_diagnostic(report: Report, file_library: &FileLibrary, main_uri: &Url) -> (Diagnostic, Url) {
         let diagnostic = report.to_diagnostic();
 
         let label = diagnostic.labels.into_iter().reduce(|cur, a| {
@@ -146,15 +166,25 @@ impl Backend {
             }
         });
 
-        let range = match label {
-            Some(label) => Range {
-                start: char_to_position(rope, label.range.start)?,
-                end: char_to_position(rope, label.range.end)?
+        let (url, range) = match label {
+            Some(label) => { 
+                let simple_file = file_library
+                    .to_storage()
+                    .get(label.file_id)
+                    .expect("invalid file_id from label");
+
+                let uri = string_to_uri(simple_file.name());
+                let rope = Rope::from_str(simple_file.source());
+
+                (uri, Range {
+                    start: char_to_position(&rope, label.range.start).expect("valid label range start"),
+                    end: char_to_position(&rope, label.range.end).expect("valid label range end")
+                })
             },
-            None => Range {
+            None => (main_uri.clone(), Range {
                 start: Position { line: 0, character: 0 },
                 end: Position { line: 0, character: 0 }
-            }
+            })
         };
 
         let severity = match diagnostic.severity {
@@ -166,7 +196,7 @@ impl Backend {
 
         let message = diagnostic.message;
 
-        Ok(Diagnostic {
+        (Diagnostic {
             range,
             severity: Some(severity),
             code: None,
@@ -176,7 +206,41 @@ impl Backend {
             related_information: None,
             tags: None,
             data: None
-        })
+        }, url)
+    }
+
+    fn other_files_diagnostic(other_files_diags: &HashMap<Url, Vec<Diagnostic>>) -> Option<Diagnostic> {
+        let locations: String = other_files_diags
+            .keys()
+            .map(|uri| {
+                format!("\n{}", uri_to_string(uri))
+            })
+            .collect();
+
+        if locations.is_empty() {
+            None
+        } else {
+            Some(Diagnostic {
+                range: Range {
+                    start: Position {
+                        line: 0,
+                        character: 0
+                    },
+                    end: Position {
+                        line: 0,
+                        character: 0
+                    },
+                },
+                severity: Some(DiagnosticSeverity::ERROR),
+                code: None,
+                code_description: None,
+                source: Some(String::from("circom_lsp")),
+                message: format!("errors found in the following files:{}", locations),
+                related_information: None,
+                tags: None,
+                data: None
+            })
+        }
     }
 }
 
@@ -356,6 +420,21 @@ fn uri_to_string(uri: &Url) -> String {
         .into_os_string()
         .into_string()
         .expect("Invalid text document URI")
+}
+
+fn string_to_uri(s: &str) -> Url {
+    let a = "/home/ramgos/ramgos/dev/blockchain/zkp/gracefulLabeling/circuits/circuit.circom";
+    Url::from_file_path(a).expect("ooga booga");
+
+    let fixed = {
+        let mut chars = s.chars();
+        chars.next();
+        chars.next_back();
+
+        chars.as_str()
+    };
+
+    Url::from_file_path(fixed).expect(&format!("String is valid URI: {}, a: {}, is_equal: {}", fixed, a, a == fixed))
 }
 
 #[tokio::main]

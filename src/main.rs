@@ -68,11 +68,14 @@ impl Backend {
 
         // do not compute archive if publish_diagnostics flag is not set, this
         // is done to prevent from tons of calls to the circom compiler
+        //
+        // also, as of now circom's parser function doesn't seperate the file library creation
+        // logic from the parseing, so it's impossible to run the parser on an intermediate buffer
         let archive = if publish_diagnostics {
             let (reports, file_library_source) = match circom_parser::run_parser(
                 path, 
-                "2.1.5", 
-                vec![], 
+                "2.1.5",  // TODO: figure what this version number actually does
+                vec![],  // TODO: add linked library support
             ) {
                 Ok((mut archive, mut reports)) => {
                     let mut type_reports = match circom_type_checker::check_types::check_types(&mut archive) {
@@ -102,7 +105,7 @@ impl Backend {
                 if uri == params.uri {
                     main_file_diags.push(diagnostic);
                 } else if other_files_diags.contains_key(&uri) {
-                    other_files_diags.get_mut(&uri).expect("other files diag contains_key").push(diagnostic);
+                    other_files_diags.get_mut(&uri).expect("other_files_diag should contain uri").push(diagnostic);
                 } else {
                     other_files_diags.insert(uri, vec![diagnostic]);
                 }
@@ -151,6 +154,7 @@ impl Backend {
         document_map.borrow_mut().insert(params.uri, document);
     }
 
+    // file_library is needed to decide in what file does the report occurs
     fn report_to_diagnostic(report: Report, file_library: &FileLibrary, main_uri: &Url) -> (Diagnostic, Url) {
         let diagnostic = report.to_diagnostic();
 
@@ -323,41 +327,26 @@ impl LanguageServer for Backend {
         let document_map = document_map.borrow();
         let document_data = document_map.get(&uri).expect("document map should have uri on hover");
 
-        let Ok(Some(word)) = find_word(&document_data.content, params.text_document_position_params.position) else {
-            return Ok(Some(Hover {
-                contents: HoverContents::Scalar(MarkedString::String(String::from("could not find word"))),
-                range: None
-            }));
-            // return Ok(None);
+        let Ok(Some((start, word))) = find_word(&document_data.content, params.text_document_position_params.position) else {
+            // return Ok(Some(simple_hover(String::from("could not find word"))))
+            return Ok(None);
         };
 
         let Some(archive) = &document_data.archive else {
-            return Ok(Some(Hover {
-                contents: HoverContents::Scalar(MarkedString::String(String::from("could not find archive"))),
-                range: None
-            }));
+            return Ok(Some(simple_hover(String::from("Could not find information (are there any compilation errors?)"))))
         };
 
         if let Some(_template_data) = archive.inner.templates.keys().find(|x| x == &&word) {
-            Ok(Some(Hover {
-                contents: HoverContents::Scalar(MarkedString::String(String::from("template"))),
-                range: None
-            }))
+            Ok(Some(simple_hover(String::from("template"))))
         } else if let Some(_function_data) = archive.inner.functions.keys().find(|x| x == &&word) {
-            Ok(Some(Hover {
-                contents: HoverContents::Scalar(MarkedString::String(String::from("function"))),
-                range: None
-            }))
+            Ok(Some(simple_hover(String::from("function"))))
         } else {
-            Ok(Some(Hover {
-                contents: HoverContents::Scalar(MarkedString::String(word)),
-                range: None
-            }))
+            Ok(Some(simple_hover(String::from(word))))
         }
     }
 }
 
-fn find_word(rope: &Rope, position: Position) -> ropey::Result<Option<String>> {
+fn find_word(rope: &Rope, position: Position) -> ropey::Result<Option<(usize, String)>> {
     let char_idx = position_to_char(rope, position)?;
     let char = rope.get_char(char_idx)
         .expect("char_idx should not be out of range since position_to_char guarantees");
@@ -384,7 +373,7 @@ fn find_word(rope: &Rope, position: Position) -> ropey::Result<Option<String>> {
             break i;
         };
 
-        Ok(Some(rope.slice(start..end).to_string()))
+        Ok(Some((start, rope.slice(start..end).to_string())))
     } else {
         Ok(None)
     }
@@ -423,9 +412,7 @@ fn uri_to_string(uri: &Url) -> String {
 }
 
 fn string_to_uri(s: &str) -> Url {
-    let a = "/home/ramgos/ramgos/dev/blockchain/zkp/gracefulLabeling/circuits/circuit.circom";
-    Url::from_file_path(a).expect("ooga booga");
-
+    // strip first and last chars because circom is stupid
     let fixed = {
         let mut chars = s.chars();
         chars.next();
@@ -434,7 +421,14 @@ fn string_to_uri(s: &str) -> Url {
         chars.as_str()
     };
 
-    Url::from_file_path(fixed).expect(&format!("String is valid URI: {}, a: {}, is_equal: {}", fixed, a, a == fixed))
+    Url::from_file_path(fixed).expect("string is valid uri")
+}
+
+fn simple_hover(message: String) -> Hover {
+    return Hover {
+        contents: HoverContents::Scalar(MarkedString::String(message)),
+        range: None
+    };
 }
 
 #[tokio::main]

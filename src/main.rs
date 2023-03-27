@@ -3,6 +3,8 @@ use tower_lsp::jsonrpc;
 use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer, LspService, Server};
 
+use itertools::Itertools;
+
 use codespan_reporting::diagnostic::{Severity, LabelStyle};
 use circom_structure::error_definition::Report;
 use circom_structure::file_definition::FileLibrary;
@@ -292,7 +294,15 @@ impl Backend {
                 CommentParserState::MaybeOutside => match c {
                     '/' => {
                         let start_idx = current_idx;
-                        return Some(content.slice(start_idx..end_idx).to_string());
+                        return Some(
+                            content
+                            .slice(start_idx+1..end_idx-1)
+                            .to_string()
+                            .lines()
+                            .map(|x| x.trim())
+                            .intersperse("\n")
+                            .collect()
+                        );
                     },
                     '*' => (),
                     _ => current_state = CommentParserState::Inside

@@ -24,6 +24,7 @@ enum FileLibrarySource {
 enum CommentParserState {
     Outside,
     MaybeInside,
+    JustEntered,
     Inside,
     MaybeOutside
 }
@@ -270,6 +271,7 @@ impl Backend {
     fn read_comment(content: &Rope, start: usize) -> Option<String> {
         let mut current_idx = start;
         let mut current_state = CommentParserState::Outside;
+        let mut start_idx = 0;
         let mut end_idx = 0;
 
         let mut iter = content.chars_at(start).reversed();
@@ -281,28 +283,40 @@ impl Backend {
                 },
                 CommentParserState::MaybeInside => match c {
                     '*' => {
-                        current_state = CommentParserState::Inside;
+                        current_state = CommentParserState::JustEntered;
                         end_idx = current_idx;
                     },
                     '/' => (),
                     _ => current_state = CommentParserState::Outside
                 },
+                CommentParserState::JustEntered => match c {
+                    '*' => end_idx = current_idx,
+                    _ => current_state = CommentParserState::Inside
+                }
                 CommentParserState::Inside => match c {
-                    '*' => current_state = CommentParserState::MaybeOutside,
+                    '*' => {
+                        current_state = CommentParserState::MaybeOutside;
+                        start_idx = current_idx;
+                    }
                     _ => ()
                 },
                 CommentParserState::MaybeOutside => match c {
                     '/' => {
-                        let start_idx = current_idx;
-                        return Some(
-                            content
-                            .slice(start_idx+1..end_idx-1)
+                        let result = content
+                            .slice(start_idx..end_idx-1)
                             .to_string()
                             .lines()
-                            .map(|x| x.trim())
+                            .map(|x| x.trim_matches(|c: char| c.is_whitespace() || c == '*'))
                             .intersperse("\n")
-                            .collect()
-                        );
+                            .collect::<String>()
+                            .trim()
+                            .to_string();
+
+                        return if !result.is_empty() {
+                            Some(result)
+                        } else {
+                            None
+                        }
                     },
                     '*' => (),
                     _ => current_state = CommentParserState::Inside

@@ -6,6 +6,8 @@ use tower_lsp::{Client, LanguageServer, LspService, Server};
 use codespan_reporting::diagnostic::{Severity, LabelStyle};
 use circom_structure::error_definition::Report;
 use circom_structure::file_definition::FileLibrary;
+use circom_structure::template_data::TemplateData;
+use circom_structure::function_data::FunctionData;
 
 use std::fmt;
 use std::sync::Mutex;
@@ -15,6 +17,19 @@ use std::collections::HashMap;
 enum FileLibrarySource {
     ProgramArchive(ProgramArchive),
     FileLibrary(FileLibrary)
+}
+
+enum CommentParserState {
+    Outside,
+    MaybeInside,
+    Inside,
+    MaybeOutside
+}
+
+#[derive(Clone, Copy)]
+enum DefinitionData<'a> {
+    Template(&'a TemplateData),
+    Function(&'a FunctionData)
 }
 
 struct TextDocumentItem {
@@ -246,6 +261,86 @@ impl Backend {
             })
         }
     }
+
+    // start is the char index where the keyword starts.
+    // example: if comment is produced for a function 'Main', the index would be the index of the
+    // character 'M'
+    fn read_comment(content: &Rope, start: usize) -> Option<String> {
+        let mut current_idx = start;
+        let mut current_state = CommentParserState::Outside;
+        let mut end_idx = 0;
+
+        let mut iter = content.chars_at(start).reversed();
+        while let Some(c) = iter.next() {
+            match current_state {
+                CommentParserState::Outside => match c {
+                    '/' => current_state = CommentParserState::MaybeInside,
+                    _ => ()
+                },
+                CommentParserState::MaybeInside => match c {
+                    '*' => {
+                        current_state = CommentParserState::Inside;
+                        end_idx = current_idx;
+                    },
+                    '/' => (),
+                    _ => current_state = CommentParserState::Outside
+                },
+                CommentParserState::Inside => match c {
+                    '*' => current_state = CommentParserState::MaybeOutside,
+                    _ => ()
+                },
+                CommentParserState::MaybeOutside => match c {
+                    '/' => {
+                        let start_idx = current_idx;
+                        return Some(content.slice(start_idx..end_idx).to_string());
+                    },
+                    '*' => (),
+                    _ => current_state = CommentParserState::Inside
+                }
+            }
+
+            current_idx -= 1;
+        }
+
+        None
+    }
+
+    fn definition_summary(defintion_data: DefinitionData, file_library: &FileLibrary) -> String {
+        let (file_id, definition_name, type_as_name) = match defintion_data {
+            DefinitionData::Template(data) => {
+                (data.get_file_id(), data.get_name(), "template")
+            },
+            DefinitionData::Function(data) => {
+                (data.get_file_id(), data.get_name(), "function")
+            },
+        };
+        let file_name = file_library.to_storage().get(file_id).expect("function data should have valid file id").name();
+
+        format!("{} \"{}\" found in {}", type_as_name, definition_name, file_name)
+    }
+
+    fn definition_start<'a>(defintion_data: DefinitionData, file_library: &'a FileLibrary) -> (&'a str, usize) {
+        let (file_id, start) = match defintion_data {
+            DefinitionData::Template(data) => {
+                (data.get_file_id(), data.get_param_location().start)
+            },
+            DefinitionData::Function(data) => {
+                (data.get_file_id(), data.get_param_location().start)
+            },
+        };
+
+        (file_library.to_storage().get(file_id).expect("file_id of definition should be valid").source(), start)
+    }
+
+    fn find_definition<'a>(name: &str, archive: &'a ProgramArchive) -> Option<DefinitionData<'a>> {
+        if let Some(template_data) = archive.inner.templates.get(name) {
+            Some(DefinitionData::Template(template_data))
+        } else if let Some(function_data) = archive.inner.functions.get(name) {
+            Some(DefinitionData::Function(function_data))
+        } else {
+            None
+        }
+    }
 }
 
 #[tower_lsp::async_trait]
@@ -327,22 +422,26 @@ impl LanguageServer for Backend {
         let document_map = document_map.borrow();
         let document_data = document_map.get(&uri).expect("document map should have uri on hover");
 
-        let Ok(Some((start, word))) = find_word(&document_data.content, params.text_document_position_params.position) else {
-            // return Ok(Some(simple_hover(String::from("could not find word"))))
+        // find what word is selected
+        let Ok(Some((_, word))) = find_word(&document_data.content, params.text_document_position_params.position) else {
             return Ok(None);
         };
 
         let Some(archive) = &document_data.archive else {
             return Ok(Some(simple_hover(String::from("Could not find information (are there any compilation errors?)"))))
         };
+        let file_library = &archive.inner.file_library;
 
-        if let Some(_template_data) = archive.inner.templates.keys().find(|x| x == &&word) {
-            Ok(Some(simple_hover(String::from("template"))))
-        } else if let Some(_function_data) = archive.inner.functions.keys().find(|x| x == &&word) {
-            Ok(Some(simple_hover(String::from("function"))))
-        } else {
-            Ok(Some(simple_hover(String::from(word))))
-        }
+        let Some(defintion_data) = Backend::find_definition(&word, &archive) else {
+            return Ok(None);
+        };
+
+        let (source, start) = Backend::definition_start(defintion_data, file_library);
+        let rope = Rope::from_str(source);
+
+        Ok(Backend::read_comment(&rope, start)
+            .or_else(|| Some(Backend::definition_summary(defintion_data, file_library)))
+            .map(|x| simple_hover(x)))
     }
 }
 

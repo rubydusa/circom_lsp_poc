@@ -265,10 +265,15 @@ impl Backend {
         }
     }
 
+    fn read_comment(content: &Rope, start: usize) -> Option<String> {
+        Self::read_multi_singleline_comment(content, start)
+            .or(Self::read_multiline_comment(content, start))
+    }
+
     // start is the char index where the keyword starts.
     // example: if comment is produced for a function 'Main', the index would be the index of the
     // character 'M'
-    fn read_comment(content: &Rope, start: usize) -> Option<String> {
+    fn read_multiline_comment(content: &Rope, start: usize) -> Option<String> {
         let mut current_idx = start;
         let mut current_state = CommentParserState::Outside;
         let mut start_idx = 0;
@@ -327,6 +332,58 @@ impl Backend {
         }
 
         None
+    }
+
+    fn read_multi_singleline_comment(content: &Rope, start: usize) -> Option<String> {
+        let mut current_line_idx = content.try_char_to_line(start).expect("char start index should be valid");
+        let mut first_comment_line = 0;
+        let mut last_comment_line = 0;
+        let mut entered = false;
+
+        while current_line_idx > 0 {
+            current_line_idx -= 1;
+
+            let line = content.line(current_line_idx);
+            // not converting to &str because it might fail (due to the structue of rope), 
+            // and allocating for each line is wasteful
+            let is_line_comment = {
+                if line.len_chars() < 2 {
+                    false 
+                } else {
+                    line.char(0) == '/' && line.char(1) == '/'
+                }
+            };
+
+            match (entered, is_line_comment) {
+                (false, true) => {
+                    entered = true;
+                    last_comment_line = current_line_idx;
+                },
+                (true, false) => {
+                    first_comment_line = current_line_idx;
+                    break;
+                },
+                _ => ()
+            }
+        }
+
+        if entered {
+            let start = content.line_to_char(first_comment_line);
+            let end = content.line_to_char(last_comment_line + 1);
+            let result = content
+                .slice(start..end)
+                .to_string()
+                .lines()
+                .map(|x| x.trim_matches(|c: char| c.is_whitespace() || c == '/'))
+                .intersperse("\n")
+                .collect::<String>()
+                .trim()
+                .to_string();
+
+            Some(result)
+        } else {
+            None
+        }
     }
 
     fn definition_summary(defintion_data: DefinitionData, file_library: &FileLibrary) -> String {

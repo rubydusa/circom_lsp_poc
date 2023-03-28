@@ -154,7 +154,7 @@ impl Backend {
             None
         };
 
-        let document_map = self.document_map.lock().unwrap();
+        let document_map = self.document_map.lock().expect("document map mutex poisened");
         // if new archive computed succesfully, insert it.
         // otherwise, use old archive
         let archive = match archive {
@@ -479,7 +479,7 @@ impl LanguageServer for Backend {
 
     async fn did_save(&self, params: DidSaveTextDocumentParams) {
         let result = {
-            let document_map = self.document_map.lock().unwrap();
+            let document_map = self.document_map.lock().expect("document_map mutex poisened");
             let document_map = document_map.borrow();
             document_map.get(&params.text_document.uri).map(|x| x.content.to_string())
         };
@@ -501,7 +501,7 @@ impl LanguageServer for Backend {
 
     async fn hover(&self, params: HoverParams) -> jsonrpc::Result<Option<Hover>> {
         let uri = params.text_document_position_params.text_document.uri;
-        let document_map = self.document_map.lock().unwrap();
+        let document_map = self.document_map.lock().expect("document_map mutex poisened");
         let document_map = document_map.borrow();
         let document_data = document_map.get(&uri).expect("document map should have uri on hover");
 
@@ -530,7 +530,7 @@ impl LanguageServer for Backend {
 
     async fn goto_definition(&self, params: GotoDefinitionParams) -> jsonrpc::Result<Option<GotoDefinitionResponse>> {
         let uri = params.text_document_position_params.text_document.uri;
-        let document_map = self.document_map.lock().unwrap();
+        let document_map = self.document_map.lock().expect("document_map mutex poisened");
         let document_map = document_map.borrow();
         let document_data = document_map.get(&uri).expect("document map should have uri on hover");
 

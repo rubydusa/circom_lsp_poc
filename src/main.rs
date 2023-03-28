@@ -6,6 +6,7 @@ use tower_lsp::{Client, LanguageServer, LspService, Server};
 use itertools::Itertools;
 
 use codespan_reporting::diagnostic::{Severity, LabelStyle};
+use codespan_reporting::files::SimpleFile;
 use circom_structure::error_definition::Report;
 use circom_structure::file_definition::FileLibrary;
 use circom_structure::template_data::TemplateData;
@@ -400,7 +401,7 @@ impl Backend {
         format!("{} \"{}\" found in {}", type_as_name, definition_name, file_name)
     }
 
-    fn definition_start<'a>(defintion_data: DefinitionData, file_library: &'a FileLibrary) -> (&'a str, usize) {
+    fn definition_start<'a>(defintion_data: DefinitionData, file_library: &'a FileLibrary) -> (&'a SimpleFile<String, String>, usize) {
         let (file_id, start) = match defintion_data {
             DefinitionData::Template(data) => {
                 (data.get_file_id(), data.get_param_location().start)
@@ -410,7 +411,7 @@ impl Backend {
             },
         };
 
-        (file_library.to_storage().get(file_id).expect("file_id of definition should be valid").source(), start)
+        (file_library.to_storage().get(file_id).expect("file_id of definition should be valid"), start)
     }
 
     fn find_definition<'a>(name: &str, archive: &'a ProgramArchive) -> Option<DefinitionData<'a>> {
@@ -433,6 +434,7 @@ impl LanguageServer for Backend {
                     TextDocumentSyncKind::FULL,
                 )),
                 hover_provider: Some(HoverProviderCapability::Simple(true)),
+                definition_provider: Some(OneOf::Left(true)),
                 ..Default::default()
             },
             ..Default::default()
@@ -517,12 +519,63 @@ impl LanguageServer for Backend {
             return Ok(None);
         };
 
-        let (source, start) = Backend::definition_start(defintion_data, file_library);
+        let (file, start) = Backend::definition_start(defintion_data, file_library);
+        let source = file.source();
         let rope = Rope::from_str(source);
 
         Ok(Backend::read_comment(&rope, start)
             .or_else(|| Some(Backend::definition_summary(defintion_data, file_library)))
             .map(|x| simple_hover(x)))
+    }
+
+    async fn goto_definition(&self, params: GotoDefinitionParams) -> jsonrpc::Result<Option<GotoDefinitionResponse>> {
+        let uri = params.text_document_position_params.text_document.uri;
+        let document_map = self.document_map.lock().unwrap();
+        let document_map = document_map.borrow();
+        let document_data = document_map.get(&uri).expect("document map should have uri on hover");
+
+        // find what word is selected
+        let Ok(Some((_, word))) = find_word(&document_data.content, params.text_document_position_params.position) else {
+            return Ok(None);
+        };
+
+        let Some(archive) = &document_data.archive else {
+            return Ok(None)
+        };
+        let file_library = &archive.inner.file_library;
+
+        let Some(defintion_data) = Backend::find_definition(&word, &archive) else {
+            return Ok(None);
+        };
+
+        let (file, start) = Backend::definition_start(defintion_data, file_library);
+        let source = file.source();
+        let definition_uri = string_to_uri(file.name()); 
+        let rope = Rope::from_str(source);
+
+        // currently, the only way to get the position of a defintion in circom
+        // is to get the param position from TemplateData / FunctionData
+        //
+        // this means that start points at the start of a function/template params, not the start
+        // of the function name - which makes the selection of the function name more tedious
+        //
+        // for now, simply disregard since using the start also as the end is safe and still
+        // provides jumping capabilities
+        let end = start /* + word.len() */;
+
+        Ok(
+            Some(
+                GotoDefinitionResponse::Scalar(
+                    Location {
+                        uri: definition_uri,
+                        range: Range {
+                            start: char_to_position(&rope, start).expect("word start should be valid"),
+                            end: char_to_position(&rope, end).expect("word end should be valid")
+                        }
+                    }
+                )
+            )
+        )
     }
 }
 

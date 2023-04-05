@@ -51,6 +51,8 @@ pub fn find_ast_node(start: usize, word: &str, file_id: usize, archive: &Program
                  }))
     .collect::<Vec<_>>();
 
+    statements_or_expressions.push(ASTNode::Expression(&archive.inner.initial_template_call));
+
     loop {
         let statement_or_expression = statements_or_expressions.pop()?;
 

@@ -3,7 +3,7 @@
 
 ## Features
 - [x] resolve TemplateOrFunction
-- [ ] take into account main component
+- [x] take into account main component
 - [x] work also outside of blocks
 - [ ] Add support for `access` (if a token is signal array, show it)
 - [ ] in case of template or function, generate docs

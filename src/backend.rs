@@ -41,7 +41,7 @@ enum DefinitionData<'a> {
     Function(&'a FunctionData)
 }
 
-enum StatementOrExpression<'a> {
+enum ASTNode<'a> {
     Statement(&'a ast::Statement),
     Expression(&'a ast::Expression),
     Contender(TokenType)
@@ -307,14 +307,14 @@ impl Backend {
         let mut statements_or_expressions = archive.inner.functions.values()
             .filter_map(|x| {
                 if x.get_file_id() == file_id {
-                    Some(StatementOrExpression::Statement(x.get_body()))
+                    Some(ASTNode::Statement(x.get_body()))
                 } else {
                     None
                 }
             }).chain(archive.inner.templates.values()
             .filter_map(|x| {
                 if x.get_file_id() == file_id {
-                    Some(StatementOrExpression::Statement(x.get_body()))
+                    Some(ASTNode::Statement(x.get_body()))
                 } else {
                     None
                 }
@@ -356,15 +356,15 @@ impl Backend {
     fn iterate_statement_or_expression<'a>(
         start: usize, 
         word: &str, 
-        statement_or_expression: StatementOrExpression<'a>,
+        statement_or_expression: ASTNode<'a>,
         archive: &ProgramArchive
-    ) -> Result<TokenType, Vec<StatementOrExpression<'a>>> {
+    ) -> Result<TokenType, Vec<ASTNode<'a>>> {
         let mut statements_or_expressions = Vec::new();
         match statement_or_expression {
-            StatementOrExpression::Contender(token_type) => {
+            ASTNode::Contender(token_type) => {
                 return Ok(token_type)
             },
-            StatementOrExpression::Statement(statement) => match statement {
+            ASTNode::Statement(statement) => match statement {
                 ast::Statement::IfThenElse { 
                     meta: ast::Meta { start: s_start, end: s_end, .. }, 
                     cond, 
@@ -372,10 +372,10 @@ impl Backend {
                     else_case 
                 } => {
                     if *s_start <= start && start <= *s_end {
-                        statements_or_expressions.push(StatementOrExpression::Expression(cond));
-                        statements_or_expressions.push(StatementOrExpression::Statement(&if_case));
+                        statements_or_expressions.push(ASTNode::Expression(cond));
+                        statements_or_expressions.push(ASTNode::Statement(&if_case));
                         if let Some(else_case) = else_case {
-                            statements_or_expressions.push(StatementOrExpression::Statement(&else_case));
+                            statements_or_expressions.push(ASTNode::Statement(&else_case));
                         }
                     }
                 },
@@ -385,8 +385,8 @@ impl Backend {
                     stmt 
                 } => {
                     if *s_start <= start && start <= *s_end {
-                        statements_or_expressions.push(StatementOrExpression::Expression(cond));
-                        statements_or_expressions.push(StatementOrExpression::Statement(&stmt));
+                        statements_or_expressions.push(ASTNode::Expression(cond));
+                        statements_or_expressions.push(ASTNode::Statement(&stmt));
                     }
                 },
                 ast::Statement::Return { 
@@ -394,7 +394,7 @@ impl Backend {
                     value
                 } => {
                     if *s_start <= start && start <= *s_end {
-                        statements_or_expressions.push(StatementOrExpression::Expression(value));
+                        statements_or_expressions.push(ASTNode::Expression(value));
                     }
                 },
                 ast::Statement::InitializationBlock { 
@@ -404,7 +404,7 @@ impl Backend {
                 } => {
                     if *s_start <= start && start <= *s_end {
                         statements_or_expressions.append(&mut initializations.into_iter()
-                            .map(|x| StatementOrExpression::Statement(x))
+                            .map(|x| ASTNode::Statement(x))
                             .collect()
                         );
                     }
@@ -437,7 +437,6 @@ impl Backend {
                         // order matters here
                         if var == word {
                             let token_type = match op {
-                                // ast::AssignOp::AssignVar => TokenType::Variable(2),
                                 ast::AssignOp::AssignVar => match rhe {
                                     ast::Expression::AnonymousComp { .. } => TokenType::Component,
                                     ast::Expression::Call { id, .. } => match Backend::find_definition_type(id, archive) {
@@ -448,9 +447,9 @@ impl Backend {
                                 },
                                 ast::AssignOp::AssignSignal | ast::AssignOp::AssignConstraintSignal => TokenType::Signal
                             };
-                            statements_or_expressions.push(StatementOrExpression::Contender(token_type));
+                            statements_or_expressions.push(ASTNode::Contender(token_type));
                         }
-                        statements_or_expressions.push(StatementOrExpression::Expression(rhe));
+                        statements_or_expressions.push(ASTNode::Expression(rhe));
                     }
                 },
                 ast::Statement::MultSubstitution { 
@@ -460,8 +459,8 @@ impl Backend {
                     ..
                 } => {
                     if *s_start <= start && start <= *s_end {
-                        statements_or_expressions.push(StatementOrExpression::Expression(lhe));
-                        statements_or_expressions.push(StatementOrExpression::Expression(rhe));
+                        statements_or_expressions.push(ASTNode::Expression(lhe));
+                        statements_or_expressions.push(ASTNode::Expression(rhe));
                     }
                 },
                 ast::Statement::UnderscoreSubstitution { 
@@ -470,7 +469,7 @@ impl Backend {
                     ..
                 } => {
                     if *s_start <= start && start <= *s_end {
-                        statements_or_expressions.push(StatementOrExpression::Expression(rhe));
+                        statements_or_expressions.push(ASTNode::Expression(rhe));
                     }
                 },
                 ast::Statement::ConstraintEquality { 
@@ -480,8 +479,8 @@ impl Backend {
                     ..
                 } => {
                     if *s_start <= start && start <= *s_end {
-                        statements_or_expressions.push(StatementOrExpression::Expression(lhe));
-                        statements_or_expressions.push(StatementOrExpression::Expression(rhe));
+                        statements_or_expressions.push(ASTNode::Expression(lhe));
+                        statements_or_expressions.push(ASTNode::Expression(rhe));
                     }
                 },
                 ast::Statement::LogCall { 
@@ -492,7 +491,7 @@ impl Backend {
                         let mut args_processed = args.into_iter()
                             .filter_map(|x| {
                                 match x {
-                                    ast::LogArgument::LogExp(exp) => Some(StatementOrExpression::Expression(exp)),
+                                    ast::LogArgument::LogExp(exp) => Some(ASTNode::Expression(exp)),
                                     _ => None
                                 }
                             })
@@ -507,7 +506,7 @@ impl Backend {
                 } => {
                     if *s_start <= start && start <= *s_end {
                         statements_or_expressions.append(&mut stmts.into_iter()
-                            .map(|x| StatementOrExpression::Statement(x))
+                            .map(|x| ASTNode::Statement(x))
                             .collect()
                         );
                     }
@@ -517,11 +516,11 @@ impl Backend {
                     arg 
                 } => {
                     if *s_start <= start && start <= *s_end {
-                        statements_or_expressions.push(StatementOrExpression::Expression(arg));
+                        statements_or_expressions.push(ASTNode::Expression(arg));
                     }
                 }
             },
-            StatementOrExpression::Expression(expression) => match expression {
+            ASTNode::Expression(expression) => match expression {
                 ast::Expression::InfixOp { 
                     meta: ast::Meta { start: s_start, end: s_end, .. }, 
                     lhe,
@@ -529,8 +528,8 @@ impl Backend {
                     ..
                 } => {
                     if *s_start <= start && start <= *s_end {
-                        statements_or_expressions.push(StatementOrExpression::Expression(lhe));
-                        statements_or_expressions.push(StatementOrExpression::Expression(rhe));
+                        statements_or_expressions.push(ASTNode::Expression(lhe));
+                        statements_or_expressions.push(ASTNode::Expression(rhe));
                     }
                 },
                 ast::Expression::PrefixOp { 
@@ -539,7 +538,7 @@ impl Backend {
                     ..
                 } => {
                     if *s_start <= start && start <= *s_end {
-                        statements_or_expressions.push(StatementOrExpression::Expression(rhe));
+                        statements_or_expressions.push(ASTNode::Expression(rhe));
                     }
                 },
                 ast::Expression::InlineSwitchOp { 
@@ -549,9 +548,9 @@ impl Backend {
                     if_false
                 } => {
                     if *s_start <= start && start <= *s_end {
-                        statements_or_expressions.push(StatementOrExpression::Expression(cond));
-                        statements_or_expressions.push(StatementOrExpression::Expression(if_true));
-                        statements_or_expressions.push(StatementOrExpression::Expression(if_false));
+                        statements_or_expressions.push(ASTNode::Expression(cond));
+                        statements_or_expressions.push(ASTNode::Expression(if_true));
+                        statements_or_expressions.push(ASTNode::Expression(if_false));
                     }
                 },
                 ast::Expression::ParallelOp { 
@@ -559,7 +558,7 @@ impl Backend {
                     rhe
                 } => {
                     if *s_start <= start && start <= *s_end {
-                        statements_or_expressions.push(StatementOrExpression::Expression(rhe));
+                        statements_or_expressions.push(ASTNode::Expression(rhe));
                     }
                 },
                 // TODO: Support access
@@ -592,14 +591,14 @@ impl Backend {
                         // order matters here
                         if id == word {
                             statements_or_expressions.push(
-                                StatementOrExpression::Contender(
+                                ASTNode::Contender(
                                     TokenType::Defintion(Backend::find_definition_type(word, archive))
                                 )
                             );
                         }
 
                         let mut args_processed = args.into_iter()
-                            .map(|x| StatementOrExpression::Expression(x))
+                            .map(|x| ASTNode::Expression(x))
                             .collect();
 
                         statements_or_expressions.append(&mut args_processed);
@@ -616,17 +615,17 @@ impl Backend {
                         // order matters here
                         if id == word {
                             statements_or_expressions.push(
-                                StatementOrExpression::Contender(
+                                ASTNode::Contender(
                                     TokenType::Defintion(Backend::find_definition_type(word, archive))
                                 )
                             );
                         }
 
                         let mut params_processed = params.into_iter()
-                            .map(|x| StatementOrExpression::Expression(x))
+                            .map(|x| ASTNode::Expression(x))
                             .collect();
                         let mut signals_processed = signals.into_iter()
-                            .map(|x| StatementOrExpression::Expression(x))
+                            .map(|x| ASTNode::Expression(x))
                             .collect();
 
                         statements_or_expressions.append(&mut params_processed);
@@ -639,7 +638,7 @@ impl Backend {
                 } => {
                     if *s_start <= start && start <= *s_end {
                         let mut values_processed = values.into_iter()
-                            .map(|x| StatementOrExpression::Expression(x))
+                            .map(|x| ASTNode::Expression(x))
                             .collect();
 
                         statements_or_expressions.append(&mut values_processed);
@@ -651,7 +650,7 @@ impl Backend {
                 } => {
                     if *s_start <= start && start <= *s_end {
                         let mut values_processed = values.into_iter()
-                            .map(|x| StatementOrExpression::Expression(x))
+                            .map(|x| ASTNode::Expression(x))
                             .collect();
 
                         statements_or_expressions.append(&mut values_processed);
@@ -663,8 +662,8 @@ impl Backend {
                     dimension
                 } => {
                     if *s_start <= start && start <= *s_end {
-                        statements_or_expressions.push(StatementOrExpression::Expression(dimension));
-                        statements_or_expressions.push(StatementOrExpression::Expression(value));
+                        statements_or_expressions.push(ASTNode::Expression(dimension));
+                        statements_or_expressions.push(ASTNode::Expression(value));
                     }
                 },
                 _ => ()

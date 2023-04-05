@@ -6,4 +6,4 @@
 - [ ] prettier hover messages
 - [x] resolve bug where things are shown as variable despite being signal
 
-- [ ] rename StatementOrExpression to something more appropriate
+- [x] rename StatementOrExpression to something more appropriate

@@ -10,7 +10,7 @@ pub fn find_word(rope: &Rope, position: Position) -> ropey::Result<Option<(usize
         let start = 'start: loop {
             let mut i = char_idx;
             for c in rope.chars_at(char_idx).reversed() {
-                if !c.is_alphanumeric() {
+                if !c.is_alphanumeric() && c != '_' {
                     break 'start i;
                 }
                 i -= 1;
@@ -20,7 +20,7 @@ pub fn find_word(rope: &Rope, position: Position) -> ropey::Result<Option<(usize
         let end = 'end: loop {
             let mut i = char_idx;
             for c in rope.chars_at(char_idx) {
-                if !c.is_alphanumeric() {
+                if !c.is_alphanumeric() && c != '_' {
                     break 'end i;
                 }
                 i += 1;

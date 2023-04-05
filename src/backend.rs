@@ -49,10 +49,14 @@ enum StatementOrExpression<'a> {
 
 #[derive(Debug)]
 enum TokenType {
-    Variable,
+    Variable(u32),
     Signal,
     Component,
-    TemplateOrFunction,
+    Defintion(DefintionType)
+}
+
+#[derive(Debug)]
+enum DefintionType {
     Template,
     Function
 }
@@ -319,23 +323,10 @@ impl Backend {
         loop {
             let statement_or_expression = statements_or_expressions.pop()?;
             
-            match Backend::iterate_statement_or_expression(start, word, statement_or_expression) {
+            match Backend::iterate_statement_or_expression(start, word, statement_or_expression, archive) {
                 Ok(token_type) => break Some(TokenInfo {
                     name: word.to_owned(),
-                    token_type: match token_type {
-                        TokenType::TemplateOrFunction => {
-                            let as_template = archive.inner.templates
-                                .values()
-                                .any(|x| x.get_name() == word);
-
-                            if as_template {
-                                TokenType::Template
-                            } else {
-                                TokenType::Function
-                            }
-                        },
-                        x => x
-                    }
+                    token_type
                 }),
                 Err(mut add_to_stack) => {
                     statements_or_expressions.append(&mut add_to_stack);
@@ -344,10 +335,28 @@ impl Backend {
         }
     }
 
+    fn find_definition_type(word: &str, archive: &ProgramArchive) -> DefintionType {
+        let as_template = archive.inner.templates
+            .values()
+            .any(|x| x.get_name() == word);
+        let as_function = archive.inner.functions
+            .values()
+            .any(|x| x.get_name() == word);
+
+        if as_template {
+            DefintionType::Template
+        } else if as_function {
+            DefintionType::Function
+        } else {
+            panic!("template_or_function unreachable!")
+        }
+    }
+
     fn iterate_statement_or_expression<'a>(
         start: usize, 
         word: &str, 
-        statement_or_expression: StatementOrExpression<'a>
+        statement_or_expression: StatementOrExpression<'a>,
+        archive: &ProgramArchive
     ) -> Result<TokenType, Vec<StatementOrExpression<'a>>> {
         let mut statements_or_expressions = Vec::new();
         match statement_or_expression {
@@ -408,7 +417,7 @@ impl Backend {
                     if *s_start <= start && start <= *s_end {
                         if name == word {
                             return Ok(match xtype {
-                                ast::VariableType::Var => TokenType::Variable,
+                                ast::VariableType::Var => TokenType::Variable(1),
                                 ast::VariableType::Signal(..) => TokenType::Signal,
                                 ast::VariableType::Component | ast::VariableType::AnonymousComponent => TokenType::Component
                             });
@@ -427,7 +436,15 @@ impl Backend {
                         // order matters here
                         if var == word {
                             let token_type = match op {
-                                ast::AssignOp::AssignVar => TokenType::Variable,
+                                // ast::AssignOp::AssignVar => TokenType::Variable(2),
+                                ast::AssignOp::AssignVar => match rhe {
+                                    ast::Expression::AnonymousComp { .. } => TokenType::Component,
+                                    ast::Expression::Call { id, .. } => match Backend::find_definition_type(id, archive) {
+                                        DefintionType::Template => TokenType::Component,
+                                        DefintionType::Function => TokenType::Variable(4)
+                                    }
+                                    _ => TokenType::Variable(2)
+                                },
                                 ast::AssignOp::AssignSignal | ast::AssignOp::AssignConstraintSignal => TokenType::Signal
                             };
                             statements_or_expressions.push(StatementOrExpression::Contender(token_type));
@@ -552,7 +569,7 @@ impl Backend {
                 } => {
                     if *s_start <= start && start <= *s_end {
                         if word == name {
-                            return Ok(TokenType::Variable);
+                            return Ok(TokenType::Variable(3));
                         }
                     }
                 },
@@ -564,7 +581,11 @@ impl Backend {
                     if *s_start <= start && start <= *s_end {
                         // order matters here
                         if id == word {
-                            statements_or_expressions.push(StatementOrExpression::Contender(TokenType::TemplateOrFunction));
+                            statements_or_expressions.push(
+                                StatementOrExpression::Contender(
+                                    TokenType::Defintion(Backend::find_definition_type(word, archive))
+                                )
+                            );
                         }
 
                         let mut args_processed = args.into_iter()
@@ -584,7 +605,11 @@ impl Backend {
                     if *s_start <= start && start <= *s_end {
                         // order matters here
                         if id == word {
-                            statements_or_expressions.push(StatementOrExpression::Contender(TokenType::TemplateOrFunction));
+                            statements_or_expressions.push(
+                                StatementOrExpression::Contender(
+                                    TokenType::Defintion(Backend::find_definition_type(word, archive))
+                                )
+                            );
                         }
 
                         let mut params_processed = params.into_iter()

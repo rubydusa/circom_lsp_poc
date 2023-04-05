@@ -4,7 +4,7 @@
 ## Features
 - [x] resolve TemplateOrFunction
 - [ ] take into account main component
-- [ ] work also outside of blocks
+- [x] work also outside of blocks
 - [ ] Add support for `access` (if a token is signal array, show it)
 - [ ] in case of template or function, generate docs
 - [ ] prettier hover messages

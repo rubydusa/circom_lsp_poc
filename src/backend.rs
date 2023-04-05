@@ -518,15 +518,13 @@ impl LanguageServer for Backend {
         let Some(archive) = &document_data.archive else {
             return Ok(Some(helpers::simple_hover(String::from("Could not find information (are there any compilation errors?)"))))
         };
-        // let file_library = &archive.inner.file_library;
 
         // TODO: A better way to relate between URI and file_id
         if let Some(token_info) = ast::find_ast_node(pos, &word, archive.inner.file_id_main, archive) {
             return Ok(Some(helpers::simple_hover(token_info.description())));
         }
 
-        Ok(None)
-        /*
+        let file_library = &archive.inner.file_library;
         let Some(defintion_data) = Backend::find_definition(&word, &archive) else {
             return Ok(None);
         };
@@ -538,7 +536,6 @@ impl LanguageServer for Backend {
         Ok(Backend::read_comment(&rope, start)
             .or_else(|| Some(Backend::definition_summary(defintion_data, file_library)))
             .map(|x| helpers::simple_hover(x)))
-        */
     }
 
     async fn goto_definition(&self, params: GotoDefinitionParams) -> jsonrpc::Result<Option<GotoDefinitionResponse>> {

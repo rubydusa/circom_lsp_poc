@@ -59,7 +59,7 @@ enum TokenType {
 
 struct TokenInfo {
     name: String,
-    token_type: TokenType
+    token_type: TokenType,
 }
 
 impl TokenInfo {
@@ -97,7 +97,6 @@ impl fmt::Debug for ProgramArchive {
 struct DocumentData {
     content: Rope,
     archive: Option<ProgramArchive>,
-    // ast: Option<AST>
 }
 
 #[derive(Debug)]
@@ -323,7 +322,20 @@ impl Backend {
             match Backend::iterate_statement_or_expression(start, word, statement_or_expression) {
                 Ok(token_type) => break Some(TokenInfo {
                     name: word.to_owned(),
-                    token_type
+                    token_type: match token_type {
+                        TokenType::TemplateOrFunction => {
+                            let as_template = archive.inner.templates
+                                .values()
+                                .any(|x| x.get_name() == word);
+
+                            if as_template {
+                                TokenType::Template
+                            } else {
+                                TokenType::Function
+                            }
+                        },
+                        x => x
+                    }
                 }),
                 Err(mut add_to_stack) => {
                     statements_or_expressions.append(&mut add_to_stack);

@@ -9,7 +9,7 @@ pub enum ASTNode<'a> {
 
 #[derive(Debug)]
 pub enum TokenType {
-    Variable(u32),
+    Variable,
     Signal,
     Component,
     Defintion(DefintionType),
@@ -148,7 +148,7 @@ fn iterate_statement_or_expression<'a>(
                 if *s_start <= start && start <= *s_end {
                     if name == word {
                         return Ok(match xtype {
-                            ast::VariableType::Var => TokenType::Variable(1),
+                            ast::VariableType::Var => TokenType::Variable,
                             ast::VariableType::Signal(..) => TokenType::Signal,
                             ast::VariableType::Component | ast::VariableType::AnonymousComponent => TokenType::Component
                         });
@@ -171,9 +171,9 @@ fn iterate_statement_or_expression<'a>(
                                 ast::Expression::AnonymousComp { .. } => TokenType::Component,
                                 ast::Expression::Call { id, .. } => match find_definition_type(id, archive) {
                                     DefintionType::Template => TokenType::Component,
-                                    DefintionType::Function => TokenType::Variable(4)
+                                    DefintionType::Function => TokenType::Variable
                                 }
-                                _ => TokenType::Variable(2)
+                                _ => TokenType::Variable
                             },
                             ast::AssignOp::AssignSignal | ast::AssignOp::AssignConstraintSignal => TokenType::Signal
                         };
@@ -304,7 +304,7 @@ fn iterate_statement_or_expression<'a>(
                     let type_reduction = meta.get_type_knowledge().get_reduces_to();
                     if word == name {
                         return Ok(match type_reduction {
-                            ast::TypeReduction::Variable => TokenType::Variable(3),
+                            ast::TypeReduction::Variable => TokenType::Variable,
                             ast::TypeReduction::Component => TokenType::Component,
                             ast::TypeReduction::Signal => TokenType::Signal,
                             ast::TypeReduction::Tag => TokenType::Tag

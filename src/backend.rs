@@ -11,6 +11,7 @@ use circom_structure::error_definition::Report;
 use circom_structure::file_definition::FileLibrary;
 use circom_structure::template_data::TemplateData;
 use circom_structure::function_data::FunctionData;
+use circom_structure::abstract_syntax_tree::ast;
 
 use std::fmt;
 use std::sync::Mutex;
@@ -18,6 +19,8 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 
 use crate::helpers;
+
+// TODO: need somehow to translate hover index to index after removal of comments
 
 enum FileLibrarySource {
     ProgramArchive(ProgramArchive),
@@ -36,6 +39,33 @@ enum CommentParserState {
 enum DefinitionData<'a> {
     Template(&'a TemplateData),
     Function(&'a FunctionData)
+}
+
+enum StatementOrExpression<'a> {
+    Statement(&'a ast::Statement),
+    Expression(&'a ast::Expression),
+    Contender(TokenType)
+}
+
+#[derive(Debug)]
+enum TokenType {
+    Variable,
+    Signal,
+    Component,
+    TemplateOrFunction,
+    Template,
+    Function
+}
+
+struct TokenInfo {
+    name: String,
+    token_type: TokenType
+}
+
+impl TokenInfo {
+    fn description(&self) -> String {
+        format!("{}: {:?}", self.name, self.token_type)
+    }
 }
 
 struct TextDocumentItem {
@@ -67,6 +97,7 @@ impl fmt::Debug for ProgramArchive {
 struct DocumentData {
     content: Rope,
     archive: Option<ProgramArchive>,
+    // ast: Option<AST>
 }
 
 #[derive(Debug)]
@@ -266,6 +297,334 @@ impl Backend {
                 data: None
             })
         }
+    }
+
+    fn find_ast_node(start: usize, word: &str, file_id: usize, archive: &ProgramArchive) -> Option<TokenInfo> {
+        let mut statements_or_expressions = archive.inner.functions.values()
+            .filter_map(|x| {
+                if x.get_file_id() == file_id {
+                    Some(StatementOrExpression::Statement(x.get_body()))
+                } else {
+                    None
+                }
+            }).chain(archive.inner.templates.values()
+            .filter_map(|x| {
+                if x.get_file_id() == file_id {
+                    Some(StatementOrExpression::Statement(x.get_body()))
+                } else {
+                    None
+                }
+            }))
+            .collect::<Vec<_>>();
+
+        loop {
+            let statement_or_expression = statements_or_expressions.pop()?;
+            
+            match Backend::iterate_statement_or_expression(start, word, statement_or_expression) {
+                Ok(token_type) => break Some(TokenInfo {
+                    name: word.to_owned(),
+                    token_type
+                }),
+                Err(mut add_to_stack) => {
+                    statements_or_expressions.append(&mut add_to_stack);
+                }
+            }
+        }
+    }
+
+    fn iterate_statement_or_expression<'a>(
+        start: usize, 
+        word: &str, 
+        statement_or_expression: StatementOrExpression<'a>
+    ) -> Result<TokenType, Vec<StatementOrExpression<'a>>> {
+        let mut statements_or_expressions = Vec::new();
+        match statement_or_expression {
+            StatementOrExpression::Contender(token_type) => {
+                return Ok(token_type)
+            },
+            StatementOrExpression::Statement(statement) => match statement {
+                ast::Statement::IfThenElse { 
+                    meta: ast::Meta { start: s_start, end: s_end, .. }, 
+                    cond, 
+                    if_case, 
+                    else_case 
+                } => {
+                    if *s_start <= start && start <= *s_end {
+                        statements_or_expressions.push(StatementOrExpression::Expression(cond));
+                        statements_or_expressions.push(StatementOrExpression::Statement(&if_case));
+                        if let Some(else_case) = else_case {
+                            statements_or_expressions.push(StatementOrExpression::Statement(&else_case));
+                        }
+                    }
+                },
+                ast::Statement::While { 
+                    meta: ast::Meta { start: s_start, end: s_end, ..}, 
+                    cond, 
+                    stmt 
+                } => {
+                    if *s_start <= start && start <= *s_end {
+                        statements_or_expressions.push(StatementOrExpression::Expression(cond));
+                        statements_or_expressions.push(StatementOrExpression::Statement(&stmt));
+                    }
+                },
+                ast::Statement::Return { 
+                    meta: ast::Meta { start: s_start, end: s_end, ..}, 
+                    value
+                } => {
+                    if *s_start <= start && start <= *s_end {
+                        statements_or_expressions.push(StatementOrExpression::Expression(value));
+                    }
+                },
+                ast::Statement::InitializationBlock { 
+                    meta: ast::Meta { start: s_start, end: s_end, ..}, 
+                    initializations,
+                    ..
+                } => {
+                    if *s_start <= start && start <= *s_end {
+                        statements_or_expressions.append(&mut initializations.into_iter()
+                            .map(|x| StatementOrExpression::Statement(x))
+                            .collect()
+                        );
+                    }
+                },
+                ast::Statement::Declaration { 
+                    meta: ast::Meta { start: s_start, end: s_end, ..}, 
+                    xtype,
+                    name,
+                    ..
+                } => {
+                    if *s_start <= start && start <= *s_end {
+                        if name == word {
+                            return Ok(match xtype {
+                                ast::VariableType::Var => TokenType::Variable,
+                                ast::VariableType::Signal(..) => TokenType::Signal,
+                                ast::VariableType::Component | ast::VariableType::AnonymousComponent => TokenType::Component
+                            });
+                        }
+                    }
+                },
+                // TODO: take into account access
+                ast::Statement::Substitution { 
+                    meta: ast::Meta { start: s_start, end: s_end, ..}, 
+                    var,
+                    op,
+                    rhe,
+                    ..
+                } => {
+                    if *s_start <= start && start <= *s_end {
+                        // order matters here
+                        if var == word {
+                            let token_type = match op {
+                                ast::AssignOp::AssignVar => TokenType::Variable,
+                                ast::AssignOp::AssignSignal | ast::AssignOp::AssignConstraintSignal => TokenType::Signal
+                            };
+                            statements_or_expressions.push(StatementOrExpression::Contender(token_type));
+                        }
+                        statements_or_expressions.push(StatementOrExpression::Expression(rhe));
+                    }
+                },
+                ast::Statement::MultSubstitution { 
+                    meta: ast::Meta { start: s_start, end: s_end, ..}, 
+                    lhe,
+                    rhe,
+                    ..
+                } => {
+                    if *s_start <= start && start <= *s_end {
+                        statements_or_expressions.push(StatementOrExpression::Expression(lhe));
+                        statements_or_expressions.push(StatementOrExpression::Expression(rhe));
+                    }
+                },
+                ast::Statement::UnderscoreSubstitution { 
+                    meta: ast::Meta { start: s_start, end: s_end, ..}, 
+                    rhe,
+                    ..
+                } => {
+                    if *s_start <= start && start <= *s_end {
+                        statements_or_expressions.push(StatementOrExpression::Expression(rhe));
+                    }
+                },
+                ast::Statement::ConstraintEquality { 
+                    meta: ast::Meta { start: s_start, end: s_end, ..}, 
+                    lhe,
+                    rhe,
+                    ..
+                } => {
+                    if *s_start <= start && start <= *s_end {
+                        statements_or_expressions.push(StatementOrExpression::Expression(lhe));
+                        statements_or_expressions.push(StatementOrExpression::Expression(rhe));
+                    }
+                },
+                ast::Statement::LogCall { 
+                    meta: ast::Meta { start: s_start, end: s_end, ..}, 
+                    args
+                } => {
+                    if *s_start <= start && start <= *s_end {
+                        let mut args_processed = args.into_iter()
+                            .filter_map(|x| {
+                                match x {
+                                    ast::LogArgument::LogExp(exp) => Some(StatementOrExpression::Expression(exp)),
+                                    _ => None
+                                }
+                            })
+                            .collect();
+
+                        statements_or_expressions.append(&mut args_processed);
+                    }
+                },
+                ast::Statement::Block {
+                    meta: ast::Meta { start: s_start, end: s_end, .. },
+                    stmts
+                } => {
+                    if *s_start <= start && start <= *s_end {
+                        statements_or_expressions.append(&mut stmts.into_iter()
+                            .map(|x| StatementOrExpression::Statement(x))
+                            .collect()
+                        );
+                    }
+                },
+                ast::Statement::Assert { 
+                    meta: ast::Meta { start: s_start, end: s_end, .. }, 
+                    arg 
+                } => {
+                    if *s_start <= start && start <= *s_end {
+                        statements_or_expressions.push(StatementOrExpression::Expression(arg));
+                    }
+                }
+            },
+            StatementOrExpression::Expression(expression) => match expression {
+                ast::Expression::InfixOp { 
+                    meta: ast::Meta { start: s_start, end: s_end, .. }, 
+                    lhe,
+                    rhe,
+                    ..
+                } => {
+                    if *s_start <= start && start <= *s_end {
+                        statements_or_expressions.push(StatementOrExpression::Expression(lhe));
+                        statements_or_expressions.push(StatementOrExpression::Expression(rhe));
+                    }
+                },
+                ast::Expression::PrefixOp { 
+                    meta: ast::Meta { start: s_start, end: s_end, .. }, 
+                    rhe,
+                    ..
+                } => {
+                    if *s_start <= start && start <= *s_end {
+                        statements_or_expressions.push(StatementOrExpression::Expression(rhe));
+                    }
+                },
+                ast::Expression::InlineSwitchOp { 
+                    meta: ast::Meta { start: s_start, end: s_end, .. }, 
+                    cond,
+                    if_true,
+                    if_false
+                } => {
+                    if *s_start <= start && start <= *s_end {
+                        statements_or_expressions.push(StatementOrExpression::Expression(cond));
+                        statements_or_expressions.push(StatementOrExpression::Expression(if_true));
+                        statements_or_expressions.push(StatementOrExpression::Expression(if_false));
+                    }
+                },
+                ast::Expression::ParallelOp { 
+                    meta: ast::Meta { start: s_start, end: s_end, .. }, 
+                    rhe
+                } => {
+                    if *s_start <= start && start <= *s_end {
+                        statements_or_expressions.push(StatementOrExpression::Expression(rhe));
+                    }
+                },
+                // TODO: Support access
+                ast::Expression::Variable { 
+                    meta: ast::Meta { start: s_start, end: s_end, .. }, 
+                    name,
+                    ..
+                } => {
+                    if *s_start <= start && start <= *s_end {
+                        if word == name {
+                            return Ok(TokenType::Variable);
+                        }
+                    }
+                },
+                ast::Expression::Call { 
+                    meta: ast::Meta { start: s_start, end: s_end, .. }, 
+                    id,
+                    args
+                } => {
+                    if *s_start <= start && start <= *s_end {
+                        // order matters here
+                        if id == word {
+                            statements_or_expressions.push(StatementOrExpression::Contender(TokenType::TemplateOrFunction));
+                        }
+
+                        let mut args_processed = args.into_iter()
+                            .map(|x| StatementOrExpression::Expression(x))
+                            .collect();
+
+                        statements_or_expressions.append(&mut args_processed);
+                    }
+                },
+                ast::Expression::AnonymousComp { 
+                    meta: ast::Meta { start: s_start, end: s_end, .. }, 
+                    id,
+                    params,
+                    signals,
+                    ..
+                } => {
+                    if *s_start <= start && start <= *s_end {
+                        // order matters here
+                        if id == word {
+                            statements_or_expressions.push(StatementOrExpression::Contender(TokenType::TemplateOrFunction));
+                        }
+
+                        let mut params_processed = params.into_iter()
+                            .map(|x| StatementOrExpression::Expression(x))
+                            .collect();
+                        let mut signals_processed = signals.into_iter()
+                            .map(|x| StatementOrExpression::Expression(x))
+                            .collect();
+
+                        statements_or_expressions.append(&mut params_processed);
+                        statements_or_expressions.append(&mut signals_processed);
+                    }
+                },
+                ast::Expression::ArrayInLine { 
+                    meta: ast::Meta { start: s_start, end: s_end, .. }, 
+                    values
+                } => {
+                    if *s_start <= start && start <= *s_end {
+                        let mut values_processed = values.into_iter()
+                            .map(|x| StatementOrExpression::Expression(x))
+                            .collect();
+
+                        statements_or_expressions.append(&mut values_processed);
+                    }
+                },
+                ast::Expression::Tuple { 
+                    meta: ast::Meta { start: s_start, end: s_end, .. }, 
+                    values
+                } => {
+                    if *s_start <= start && start <= *s_end {
+                        let mut values_processed = values.into_iter()
+                            .map(|x| StatementOrExpression::Expression(x))
+                            .collect();
+
+                        statements_or_expressions.append(&mut values_processed);
+                    }
+                },
+                ast::Expression::UniformArray { 
+                    meta: ast::Meta { start: s_start, end: s_end, .. }, 
+                    value,
+                    dimension
+                } => {
+                    if *s_start <= start && start <= *s_end {
+                        statements_or_expressions.push(StatementOrExpression::Expression(dimension));
+                        statements_or_expressions.push(StatementOrExpression::Expression(value));
+                    }
+                },
+                _ => ()
+            }
+        }
+
+        return Err(statements_or_expressions);
     }
 
     fn read_comment(content: &Rope, start: usize) -> Option<String> {
@@ -508,15 +867,22 @@ impl LanguageServer for Backend {
         let document_data = document_map.get(&uri).expect("document map should have uri on hover");
 
         // find what word is selected
-        let Ok(Some((_, word))) = helpers::find_word(&document_data.content, params.text_document_position_params.position) else {
+        let Ok(Some((pos, word))) = helpers::find_word(&document_data.content, params.text_document_position_params.position) else {
             return Ok(None);
         };
 
         let Some(archive) = &document_data.archive else {
             return Ok(Some(helpers::simple_hover(String::from("Could not find information (are there any compilation errors?)"))))
         };
-        let file_library = &archive.inner.file_library;
+        // let file_library = &archive.inner.file_library;
 
+        // TODO: A better way to relate between URI and file_id
+        if let Some(token_info) = Backend::find_ast_node(pos, &word, archive.inner.file_id_main, archive) {
+            return Ok(Some(helpers::simple_hover(token_info.description())));
+        }
+
+        Ok(None)
+        /*
         let Some(defintion_data) = Backend::find_definition(&word, &archive) else {
             return Ok(None);
         };
@@ -528,6 +894,7 @@ impl LanguageServer for Backend {
         Ok(Backend::read_comment(&rope, start)
             .or_else(|| Some(Backend::definition_summary(defintion_data, file_library)))
             .map(|x| helpers::simple_hover(x)))
+        */
     }
 
     async fn goto_definition(&self, params: GotoDefinitionParams) -> jsonrpc::Result<Option<GotoDefinitionResponse>> {

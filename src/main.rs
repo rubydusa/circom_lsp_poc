@@ -1,5 +1,6 @@
 mod backend;
 mod helpers;
+mod ast;
 
 use tower_lsp::{LspService, Server};
 use backend::Backend;

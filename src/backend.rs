@@ -52,7 +52,8 @@ enum TokenType {
     Variable(u32),
     Signal,
     Component,
-    Defintion(DefintionType)
+    Defintion(DefintionType),
+    Tag
 }
 
 #[derive(Debug)]
@@ -563,13 +564,22 @@ impl Backend {
                 },
                 // TODO: Support access
                 ast::Expression::Variable { 
-                    meta: ast::Meta { start: s_start, end: s_end, .. }, 
+                    meta,
                     name,
                     ..
                 } => {
+                    let ast::Meta { start: s_start, end: s_end, .. } = meta;
                     if *s_start <= start && start <= *s_end {
+                        // TODO: get_reduces_to panics by default, make it so it can print custom error
+                        // message depending on where reduction failed
+                        let type_reduction = meta.get_type_knowledge().get_reduces_to();
                         if word == name {
-                            return Ok(TokenType::Variable(3));
+                            return Ok(match type_reduction {
+                                ast::TypeReduction::Variable => TokenType::Variable(3),
+                                ast::TypeReduction::Component => TokenType::Component,
+                                ast::TypeReduction::Signal => TokenType::Signal,
+                                ast::TypeReduction::Tag => TokenType::Tag
+                            });
                         }
                     }
                 },

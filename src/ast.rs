@@ -1,5 +1,6 @@
 use circom_structure::abstract_syntax_tree::ast;
 use crate::backend::ProgramArchive;
+use num_traits::cast::ToPrimitive;
 
 pub enum ASTNode<'a> {
     Statement(&'a ast::Statement),
@@ -9,9 +10,9 @@ pub enum ASTNode<'a> {
 
 #[derive(Debug)]
 pub enum TokenType {
-    Variable,
-    Signal,
-    Component,
+    Variable(Vec<Option<AccessType>>),
+    Signal(Vec<Option<AccessType>>),
+    Component(Vec<Option<AccessType>>),
     Defintion(DefintionType),
     Tag
 }
@@ -20,6 +21,12 @@ pub enum TokenType {
 pub enum DefintionType {
     Template,
     Function
+}
+
+#[derive(Debug)]
+pub enum AccessType {
+    Num(u32),
+    Var(String),
 }
 
 pub struct TokenInfo {
@@ -145,14 +152,26 @@ fn iterate_statement_or_expression<'a>(
                 meta: ast::Meta { start: s_start, end: s_end, ..}, 
                 xtype,
                 name,
+                dimensions,
                 ..
             } => {
                 if *s_start <= start && start <= *s_end {
                     if name == word {
+                        let access = dimensions.into_iter().map(|x| {
+                            match x {
+                                ast::Expression::Number(_, big_int) => Some(AccessType::Num(big_int
+                                    .to_u32()
+                                    .expect("signal array length shouldnt be big")
+                                )),
+                                ast::Expression::Variable { name, .. } => Some(AccessType::Var(name.to_owned())),
+                                _ => None
+                            }
+                        }).collect();
+
                         return Ok(match xtype {
-                            ast::VariableType::Var => TokenType::Variable,
-                            ast::VariableType::Signal(..) => TokenType::Signal,
-                            ast::VariableType::Component | ast::VariableType::AnonymousComponent => TokenType::Component
+                            ast::VariableType::Var => TokenType::Variable(access),
+                            ast::VariableType::Signal(..) => TokenType::Signal(access),
+                            ast::VariableType::Component | ast::VariableType::AnonymousComponent => TokenType::Component(access)
                         });
                     }
                 }
@@ -163,21 +182,42 @@ fn iterate_statement_or_expression<'a>(
                 var,
                 op,
                 rhe,
+                access,
                 ..
             } => {
                 if *s_start <= start && start <= *s_end {
                     // order matters here
                     if var == word {
+                        let access = access.into_iter()
+                            .take_while(|x| {
+                                match x {
+                                    ast::Access::ArrayAccess(_) => true,
+                                    _ => false
+                                }
+                            })
+                            .map(|x| {
+                                match x {
+                                    ast::Access::ArrayAccess(e) => match e {
+                                        ast::Expression::Number(_, big_int) => Some(AccessType::Num(big_int
+                                            .to_u32()
+                                            .expect("signal array length shouldnt be big"))),
+                                        ast::Expression::Variable { name, .. } => Some(AccessType::Var(name.to_owned())),
+                                        _ => None
+                                    },
+                                    _ => unreachable!()
+                                }
+                            })
+                            .collect();
                         let token_type = match op {
                             ast::AssignOp::AssignVar => match rhe {
-                                ast::Expression::AnonymousComp { .. } => TokenType::Component,
+                                ast::Expression::AnonymousComp { .. } => TokenType::Component(access),
                                 ast::Expression::Call { id, .. } => match find_definition_type(id, archive) {
-                                    DefintionType::Template => TokenType::Component,
-                                    DefintionType::Function => TokenType::Variable
+                                    DefintionType::Template => TokenType::Component(access),
+                                    DefintionType::Function => TokenType::Variable(access)
                                 }
-                                _ => TokenType::Variable
+                                _ => TokenType::Variable(access)
                             },
-                            ast::AssignOp::AssignSignal | ast::AssignOp::AssignConstraintSignal => TokenType::Signal
+                            ast::AssignOp::AssignSignal | ast::AssignOp::AssignConstraintSignal => TokenType::Signal(access)
                         };
                         statements_or_expressions.push(ASTNode::Contender(token_type));
                     }
@@ -297,6 +337,7 @@ fn iterate_statement_or_expression<'a>(
             ast::Expression::Variable { 
                 meta,
                 name,
+                access,
                 ..
             } => {
                 let ast::Meta { start: s_start, end: s_end, .. } = meta;
@@ -304,11 +345,32 @@ fn iterate_statement_or_expression<'a>(
                     // TODO: get_reduces_to panics by default, make it so it can print custom error
                     // message depending on where reduction failed
                     let type_reduction = meta.get_type_knowledge().get_reduces_to();
+                    let access = access.into_iter()
+                        .take_while(|x| {
+                            match x {
+                                ast::Access::ArrayAccess(_) => true,
+                                _ => false
+                            }
+                        })
+                        .map(|x| {
+                            match x {
+                                ast::Access::ArrayAccess(e) => match e {
+                                    ast::Expression::Number(_, big_int) => Some(AccessType::Num(big_int
+                                        .to_u32()
+                                        .expect("signal array length shouldnt be big"))),
+                                    ast::Expression::Variable { name, .. } => Some(AccessType::Var(name.to_owned())),
+                                    _ => None
+                                },
+                                _ => unreachable!()
+                            }
+                        })
+                        .collect();
+
                     if word == name {
                         return Ok(match type_reduction {
-                            ast::TypeReduction::Variable => TokenType::Variable,
-                            ast::TypeReduction::Component => TokenType::Component,
-                            ast::TypeReduction::Signal => TokenType::Signal,
+                            ast::TypeReduction::Variable => TokenType::Variable(access),
+                            ast::TypeReduction::Component => TokenType::Component(access),
+                            ast::TypeReduction::Signal => TokenType::Signal(access),
                             ast::TypeReduction::Tag => TokenType::Tag
                         });
                     }

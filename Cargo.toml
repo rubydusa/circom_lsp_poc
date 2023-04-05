@@ -18,3 +18,5 @@ ropey = "1.6.0"
 tokio = { version = "1.26.0", features = ["rt-multi-thread", "macros", "io-std"] }
 codespan-reporting = "0.9.0"
 itertools = "0.10.5"
+num-traits = "0.2.6"
+

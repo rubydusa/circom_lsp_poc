@@ -5,9 +5,11 @@
 - [x] resolve TemplateOrFunction
 - [x] take into account main component
 - [x] work also outside of blocks
-- [ ] Add support for `access` (if a token is signal array, show it)
+- [x] Add support for `access` (if a token is signal array, show it)
 - [ ] in case of template or function, generate docs
 - [ ] prettier hover messages
+
+- [ ] defintions should show params, templates show input and output signals
 
 ## Bugs
 - [x] resolve bug where things are shown as variable despite being signal

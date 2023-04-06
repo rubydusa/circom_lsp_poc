@@ -1,16 +1,21 @@
+use ropey::Rope;
+
 use circom_structure::abstract_syntax_tree::ast;
 use circom_structure::file_definition::FileLibrary;
 use circom_structure::function_data::FunctionData;
 use circom_structure::template_data::TemplateData;
 use codespan_reporting::files::SimpleFile;
 
+use std::ops::Range;
+
 use num_traits::cast::ToPrimitive;
 
+use crate::parse;
 use crate::wrappers::*;
 
 pub enum Contender<'a> {
     StatementOrExpression(StatementOrExpression<'a>),
-    Contender(TokenType),
+    Contender(TokenInfo),
 }
 
 #[derive(Clone, Copy)]
@@ -24,12 +29,12 @@ pub enum TokenType {
     Variable(Vec<Option<AccessType>>),
     Signal(Vec<Option<AccessType>>),
     Component(Vec<Option<AccessType>>),
-    Defintion(DefintionType),
+    Defintion(DefinitionType),
     Tag,
 }
 
 #[derive(Debug)]
-pub enum DefintionType {
+pub enum DefinitionType {
     Template,
     Function,
 }
@@ -40,12 +45,37 @@ pub enum AccessType {
     Var(String),
 }
 
+#[derive(Clone, Copy)]
+pub enum DefinitionData<'a> {
+    Template(&'a TemplateData),
+    Function(&'a FunctionData),
+}
+
 pub struct TokenInfo {
     name: String,
     token_type: TokenType,
+    location: Range<usize>,
+    docs: Option<String>,
 }
 
 impl TokenInfo {
+    pub fn new(
+        name: String,
+        token_type: TokenType,
+        meta: &ast::Meta,
+        archive: &ProgramArchive,
+    ) -> TokenInfo {
+        let location = meta.start..meta.end;
+        let docs = get_docs(&name, archive);
+
+        TokenInfo {
+            name,
+            token_type,
+            location,
+            docs,
+        }
+    }
+
     pub fn description(&self) -> String {
         format!("{}: {:?}", self.name, self.token_type)
     }
@@ -89,11 +119,8 @@ pub fn find_token(
         let statement_or_expression = statements_or_expressions.pop()?;
 
         match iterate_contender(start, word, statement_or_expression, archive) {
-            Ok(token_type) => {
-                break Some(TokenInfo {
-                    name: word.to_owned(),
-                    token_type,
-                })
+            Ok(token_info) => {
+                break Some(token_info);
             }
             Err(mut add_to_stack) => {
                 statements_or_expressions.append(&mut add_to_stack);
@@ -102,35 +129,14 @@ pub fn find_token(
     }
 }
 
-fn find_definition_type(word: &str, archive: &ProgramArchive) -> DefintionType {
-    let as_template = archive
-        .inner
-        .templates
-        .values()
-        .any(|x| x.get_name() == word);
-    let as_function = archive
-        .inner
-        .functions
-        .values()
-        .any(|x| x.get_name() == word);
-
-    if as_template {
-        DefintionType::Template
-    } else if as_function {
-        DefintionType::Function
-    } else {
-        panic!("template_or_function unreachable!")
-    }
-}
-
 fn iterate_contender<'a>(
     start: usize,
     word: &str,
     contender: Contender<'a>,
     archive: &ProgramArchive,
-) -> Result<TokenType, Vec<Contender<'a>>> {
+) -> Result<TokenInfo, Vec<Contender<'a>>> {
     match contender {
-        Contender::Contender(token_type) => Ok(token_type),
+        Contender::Contender(token_info) => Ok(token_info),
         Contender::StatementOrExpression(statement_or_expression) => {
             let mut contenders = Vec::new();
             let meta = get_meta(statement_or_expression);
@@ -261,9 +267,13 @@ fn iterate_contender<'a>(
                                         TokenType::Component(access)
                                     }
                                     ast::Expression::Call { id, .. } => {
-                                        match find_definition_type(id, archive) {
-                                            DefintionType::Template => TokenType::Component(access),
-                                            DefintionType::Function => TokenType::Variable(access),
+                                        match find_definition_type(id, archive)
+                                            .expect("call should have valid defintion")
+                                        {
+                                            DefinitionType::Template => {
+                                                TokenType::Component(access)
+                                            }
+                                            DefinitionType::Function => TokenType::Variable(access),
                                         }
                                     }
                                     _ => TokenType::Variable(access),
@@ -273,7 +283,12 @@ fn iterate_contender<'a>(
                                     TokenType::Signal(access)
                                 }
                             };
-                            contenders.push(Contender::Contender(token_type));
+                            contenders.push(Contender::Contender(TokenInfo::new(
+                                word.to_owned(),
+                                token_type,
+                                meta,
+                                archive,
+                            )));
                         }
                         contenders.push(Contender::StatementOrExpression(
                             StatementOrExpression::Expression(rhe),
@@ -419,8 +434,14 @@ fn iterate_contender<'a>(
                     ast::Expression::Call { id, args, .. } => {
                         // order matters here
                         if id == word {
-                            contenders.push(Contender::Contender(TokenType::Defintion(
-                                find_definition_type(word, archive),
+                            contenders.push(Contender::Contender(TokenInfo::new(
+                                word.to_owned(),
+                                TokenType::Defintion(
+                                    find_definition_type(word, archive)
+                                        .expect("call should have valid defintion"),
+                                ),
+                                meta,
+                                archive,
                             )));
                         }
 
@@ -444,8 +465,14 @@ fn iterate_contender<'a>(
                     } => {
                         // order matters here
                         if id == word {
-                            contenders.push(Contender::Contender(TokenType::Defintion(
-                                find_definition_type(word, archive),
+                            contenders.push(Contender::Contender(TokenInfo::new(
+                                word.to_owned(),
+                                TokenType::Defintion(
+                                    find_definition_type(word, archive)
+                                        .expect("call should have valid definiton"),
+                                ),
+                                meta,
+                                archive,
                             )));
                         }
 
@@ -512,12 +539,58 @@ fn iterate_contender<'a>(
             };
 
             if let Some(token_type) = token_type {
-                Ok(token_type)
+                Ok(TokenInfo::new(word.to_owned(), token_type, meta, archive))
             } else {
                 Err(contenders)
             }
         }
     }
+}
+
+fn get_docs(name: &str, archive: &ProgramArchive) -> Option<String> {
+    find_definition(name, archive)
+        .map(|x| {
+            let (file, start) = definition_location(x, &archive.inner.file_library);
+            let content = Rope::from_str(file.source());
+
+            parse::read_comment(&content, start)
+        })
+        .flatten()
+}
+
+fn find_definition_type(name: &str, archive: &ProgramArchive) -> Option<DefinitionType> {
+    find_definition(name, archive).map(|x| match x {
+        DefinitionData::Template(_) => DefinitionType::Template,
+        DefinitionData::Function(_) => DefinitionType::Function,
+    })
+}
+
+fn find_definition<'a>(name: &str, archive: &'a ProgramArchive) -> Option<DefinitionData<'a>> {
+    if let Some(template_data) = archive.inner.templates.get(name) {
+        Some(DefinitionData::Template(template_data))
+    } else if let Some(function_data) = archive.inner.functions.get(name) {
+        Some(DefinitionData::Function(function_data))
+    } else {
+        None
+    }
+}
+
+fn definition_location<'a>(
+    defintion_data: DefinitionData,
+    file_library: &'a FileLibrary,
+) -> (&'a SimpleFile<String, String>, usize) {
+    let (file_id, start) = match defintion_data {
+        DefinitionData::Template(data) => (data.get_file_id(), data.get_param_location().start),
+        DefinitionData::Function(data) => (data.get_file_id(), data.get_param_location().start),
+    };
+
+    (
+        file_library
+            .to_storage()
+            .get(file_id)
+            .expect("file_id of definition should be valid"),
+        start,
+    )
 }
 
 fn get_meta<'a>(statement_or_expression: StatementOrExpression<'a>) -> &'a ast::Meta {
@@ -549,39 +622,5 @@ fn get_meta<'a>(statement_or_expression: StatementOrExpression<'a>) -> &'a ast::
             ast::Expression::Tuple { meta, .. } => meta,
             ast::Expression::UniformArray { meta, .. } => meta,
         },
-    }
-}
-
-#[derive(Clone, Copy)]
-pub enum DefinitionData<'a> {
-    Template(&'a TemplateData),
-    Function(&'a FunctionData),
-}
-
-pub fn definition_location<'a>(
-    defintion_data: DefinitionData,
-    file_library: &'a FileLibrary,
-) -> (&'a SimpleFile<String, String>, usize) {
-    let (file_id, start) = match defintion_data {
-        DefinitionData::Template(data) => (data.get_file_id(), data.get_param_location().start),
-        DefinitionData::Function(data) => (data.get_file_id(), data.get_param_location().start),
-    };
-
-    (
-        file_library
-            .to_storage()
-            .get(file_id)
-            .expect("file_id of definition should be valid"),
-        start,
-    )
-}
-
-pub fn find_definition<'a>(name: &str, archive: &'a ProgramArchive) -> Option<DefinitionData<'a>> {
-    if let Some(template_data) = archive.inner.templates.get(name) {
-        Some(DefinitionData::Template(template_data))
-    } else if let Some(function_data) = archive.inner.functions.get(name) {
-        Some(DefinitionData::Function(function_data))
-    } else {
-        None
     }
 }

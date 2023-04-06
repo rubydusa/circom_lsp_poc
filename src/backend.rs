@@ -406,7 +406,7 @@ impl Backend {
         format!("{} \"{}\" found in {}", type_as_name, definition_name, file_name)
     }
 
-    fn definition_start<'a>(defintion_data: DefinitionData, file_library: &'a FileLibrary) -> (&'a SimpleFile<String, String>, usize) {
+    fn definition_location<'a>(defintion_data: DefinitionData, file_library: &'a FileLibrary) -> (&'a SimpleFile<String, String>, usize) {
         let (file_id, start) = match defintion_data {
             DefinitionData::Template(data) => {
                 (data.get_file_id(), data.get_param_location().start)
@@ -529,7 +529,7 @@ impl LanguageServer for Backend {
             return Ok(None);
         };
 
-        let (file, start) = Backend::definition_start(defintion_data, file_library);
+        let (file, start) = Backend::definition_location(defintion_data, file_library);
         let source = file.source();
         let rope = Rope::from_str(source);
 
@@ -558,7 +558,7 @@ impl LanguageServer for Backend {
             return Ok(None);
         };
 
-        let (file, start) = Backend::definition_start(defintion_data, file_library);
+        let (file, start) = Backend::definition_location(defintion_data, file_library);
         let source = file.source();
         let definition_uri = helpers::string_to_uri(file.name()); 
         let rope = Rope::from_str(source);

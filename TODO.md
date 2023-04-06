@@ -13,7 +13,7 @@
 
 ## Bugs
 - [x] resolve bug where things are shown as variable despite being signal
-- [x] resolve bug where if function / template is not 
+- [ ] resolve bug where if function / template is not included in final archive it is not reachable by `find_token`
 - [ ] hover not showing in return statements
 - [ ] hover not showing in accesses
 

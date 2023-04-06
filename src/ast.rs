@@ -40,7 +40,7 @@ impl TokenInfo {
     }
 }
 
-pub fn find_ast_node(start: usize, word: &str, file_id: usize, archive: &ProgramArchive) -> Option<TokenInfo> {
+pub fn find_token(start: usize, word: &str, file_id: usize, archive: &ProgramArchive) -> Option<TokenInfo> {
     let mut statements_or_expressions = archive.inner.functions.values()
         .filter_map(|x| {
             if x.get_file_id() == file_id {
@@ -176,7 +176,6 @@ fn iterate_statement_or_expression<'a>(
                     }
                 }
             },
-            // TODO: take into account access
             ast::Statement::Substitution { 
                 meta: ast::Meta { start: s_start, end: s_end, ..}, 
                 var,
@@ -333,7 +332,6 @@ fn iterate_statement_or_expression<'a>(
                     statements_or_expressions.push(ASTNode::Expression(rhe));
                 }
             },
-            // TODO: Support access
             ast::Expression::Variable { 
                 meta,
                 name,

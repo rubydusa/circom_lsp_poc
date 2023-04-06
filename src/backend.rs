@@ -3,42 +3,27 @@ use tower_lsp::jsonrpc;
 use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer};
 
-use itertools::Itertools;
-
 use codespan_reporting::diagnostic::{Severity, LabelStyle};
-use codespan_reporting::files::SimpleFile;
 use circom_structure::error_definition::Report;
 use circom_structure::file_definition::FileLibrary;
-use circom_structure::template_data::TemplateData;
-use circom_structure::function_data::FunctionData;
 
-use std::fmt;
 use std::sync::Mutex;
 use std::cell::RefCell;
 use std::collections::HashMap;
 
-use crate::helpers;
+use crate::parse;
 use crate::ast;
-
-// TODO: need somehow to translate hover index to index after removal of comments
+use crate::wrappers::*;
 
 enum FileLibrarySource {
     ProgramArchive(ProgramArchive),
     FileLibrary(FileLibrary)
 }
 
-enum CommentParserState {
-    Outside,
-    MaybeInside,
-    JustEntered,
-    Inside,
-    MaybeOutside
-}
-
-#[derive(Clone, Copy)]
-enum DefinitionData<'a> {
-    Template(&'a TemplateData),
-    Function(&'a FunctionData)
+#[derive(Debug)]
+struct DocumentData {
+    content: Rope,
+    archive: Option<ProgramArchive>,
 }
 
 struct TextDocumentItem {
@@ -47,30 +32,6 @@ struct TextDocumentItem {
     version: Option<i32>,
 }
 
-// circom's program archive doesn't implement debug
-pub struct ProgramArchive {
-    pub inner: circom_structure::program_archive::ProgramArchive
-}
-impl ProgramArchive {
-    pub fn new(inner: circom_structure::program_archive::ProgramArchive) -> ProgramArchive {
-        ProgramArchive {
-            inner
-        }
-    }
-}
-
-impl fmt::Debug for ProgramArchive {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("ProgramArchive")
-         .finish()
-    }
-}
-
-#[derive(Debug)]
-struct DocumentData {
-    content: Rope,
-    archive: Option<ProgramArchive>,
-}
 
 #[derive(Debug)]
 pub struct Backend {
@@ -87,7 +48,7 @@ impl Backend {
     }
 
     async fn on_change(&self, params: TextDocumentItem, publish_diagnostics: bool) {
-        let path = helpers::uri_to_string(&params.uri);
+        let path = parse::uri_to_string(&params.uri);
         let rope = Rope::from_str(&params.text);
 
         // do not compute archive if publish_diagnostics flag is not set, this
@@ -201,12 +162,12 @@ impl Backend {
                     .get(label.file_id)
                     .expect("invalid file_id from label");
 
-                let uri = helpers::string_to_uri(simple_file.name());
+                let uri = parse::string_to_uri(simple_file.name());
                 let rope = Rope::from_str(simple_file.source());
 
                 (uri, Range {
-                    start: helpers::char_to_position(&rope, label.range.start).expect("valid label range start"),
-                    end: helpers::char_to_position(&rope, label.range.end).expect("valid label range end")
+                    start: parse::char_to_position(&rope, label.range.start).expect("valid label range start"),
+                    end: parse::char_to_position(&rope, label.range.end).expect("valid label range end")
                 })
             },
             None => (main_uri.clone(), Range {
@@ -241,7 +202,7 @@ impl Backend {
         let locations: String = other_files_diags
             .keys()
             .map(|uri| {
-                format!("\n{}", helpers::uri_to_string(uri))
+                format!("\n{}", parse::uri_to_string(uri))
             })
             .collect();
 
@@ -268,164 +229,6 @@ impl Backend {
                 tags: None,
                 data: None
             })
-        }
-    }
-
-    fn read_comment(content: &Rope, start: usize) -> Option<String> {
-        Self::read_multi_singleline_comment(content, start)
-            .or(Self::read_multiline_comment(content, start))
-    }
-
-    // start is the char index where the keyword starts.
-    // example: if comment is produced for a function 'Main', the index would be the index of the
-    // character 'M'
-    fn read_multiline_comment(content: &Rope, start: usize) -> Option<String> {
-        let mut current_idx = start;
-        let mut current_state = CommentParserState::Outside;
-        let mut start_idx = 0;
-        let mut end_idx = 0;
-
-        let mut iter = content.chars_at(start).reversed();
-        while let Some(c) = iter.next() {
-            match current_state {
-                CommentParserState::Outside => match c {
-                    '/' => current_state = CommentParserState::MaybeInside,
-                    _ => ()
-                },
-                CommentParserState::MaybeInside => match c {
-                    '*' => {
-                        current_state = CommentParserState::JustEntered;
-                        end_idx = current_idx;
-                    },
-                    '/' => (),
-                    _ => current_state = CommentParserState::Outside
-                },
-                CommentParserState::JustEntered => match c {
-                    '*' => end_idx = current_idx,
-                    _ => current_state = CommentParserState::Inside
-                }
-                CommentParserState::Inside => match c {
-                    '*' => {
-                        current_state = CommentParserState::MaybeOutside;
-                        start_idx = current_idx;
-                    }
-                    _ => ()
-                },
-                CommentParserState::MaybeOutside => match c {
-                    '/' => {
-                        let result = content
-                            .slice(start_idx..end_idx-1)
-                            .to_string()
-                            .lines()
-                            .map(|x| x.trim_matches(|c: char| c.is_whitespace() || c == '*'))
-                            .intersperse("\n")
-                            .collect::<String>()
-                            .trim()
-                            .to_string();
-
-                        return if !result.is_empty() {
-                            Some(result)
-                        } else {
-                            None
-                        }
-                    },
-                    '*' => (),
-                    _ => current_state = CommentParserState::Inside
-                }
-            }
-
-            current_idx -= 1;
-        }
-
-        None
-    }
-
-    fn read_multi_singleline_comment(content: &Rope, start: usize) -> Option<String> {
-        let mut current_line_idx = content.try_char_to_line(start).expect("char start index should be valid");
-        let mut first_comment_line = 0;
-        let mut last_comment_line = 0;
-        let mut entered = false;
-
-        while current_line_idx > 0 {
-            current_line_idx -= 1;
-
-            let line = content.line(current_line_idx);
-            // not converting to &str because it might fail (due to the structue of rope), 
-            // and allocating for each line is wasteful
-            let is_line_comment = {
-                if line.len_chars() < 2 {
-                    false 
-                } else {
-                    line.char(0) == '/' && line.char(1) == '/'
-                }
-            };
-
-            match (entered, is_line_comment) {
-                (false, true) => {
-                    entered = true;
-                    last_comment_line = current_line_idx;
-                },
-                (true, false) => {
-                    first_comment_line = current_line_idx;
-                    break;
-                },
-                _ => ()
-            }
-        }
-
-        if entered {
-            let start = content.line_to_char(first_comment_line);
-            let end = content.line_to_char(last_comment_line + 1);
-            let result = content
-                .slice(start..end)
-                .to_string()
-                .lines()
-                .map(|x| x.trim_matches(|c: char| c.is_whitespace() || c == '/'))
-                .intersperse("\n")
-                .collect::<String>()
-                .trim()
-                .to_string();
-
-            Some(result)
-        } else {
-            None
-        }
-    }
-
-    fn definition_summary(defintion_data: DefinitionData, file_library: &FileLibrary) -> String {
-        let (file_id, definition_name, type_as_name) = match defintion_data {
-            DefinitionData::Template(data) => {
-                (data.get_file_id(), data.get_name(), "template")
-            },
-            DefinitionData::Function(data) => {
-                (data.get_file_id(), data.get_name(), "function")
-            },
-        };
-        let file_name = file_library.to_storage().get(file_id).expect("function data should have valid file id").name();
-
-        format!("{} \"{}\" found in {}", type_as_name, definition_name, file_name)
-    }
-
-    fn definition_location<'a>(defintion_data: DefinitionData, file_library: &'a FileLibrary) -> (&'a SimpleFile<String, String>, usize) {
-        let (file_id, start) = match defintion_data {
-            DefinitionData::Template(data) => {
-                (data.get_file_id(), data.get_param_location().start)
-            },
-            DefinitionData::Function(data) => {
-                (data.get_file_id(), data.get_param_location().start)
-            },
-        };
-
-        (file_library.to_storage().get(file_id).expect("file_id of definition should be valid"), start)
-    }
-
-    fn find_definition<'a>(name: &str, archive: &'a ProgramArchive) -> Option<DefinitionData<'a>> {
-        if let Some(template_data) = archive.inner.templates.get(name) {
-            Some(DefinitionData::Template(template_data))
-        } else if let Some(function_data) = archive.inner.functions.get(name) {
-            Some(DefinitionData::Function(function_data))
-        } else {
-            None
         }
     }
 }
@@ -511,31 +314,20 @@ impl LanguageServer for Backend {
         let document_data = document_map.get(&uri).expect("document map should have uri on hover");
 
         // find what word is selected
-        let Ok(Some((pos, word))) = helpers::find_word(&document_data.content, params.text_document_position_params.position) else {
+        let Ok(Some((pos, word))) = parse::find_word(&document_data.content, params.text_document_position_params.position) else {
             return Ok(None);
         };
 
         let Some(archive) = &document_data.archive else {
-            return Ok(Some(helpers::simple_hover(String::from("Could not find information (are there any compilation errors?)"))))
+            return Ok(Some(parse::simple_hover(String::from("Could not find information (are there any compilation errors?)"))))
         };
 
         // TODO: A better way to relate between URI and file_id
         if let Some(token_info) = ast::find_token(pos, &word, archive.inner.file_id_main, archive) {
-            return Ok(Some(helpers::simple_hover(token_info.description())));
+            return Ok(Some(parse::simple_hover(token_info.description())));
         }
 
-        let file_library = &archive.inner.file_library;
-        let Some(defintion_data) = Backend::find_definition(&word, &archive) else {
-            return Ok(None);
-        };
-
-        let (file, start) = Backend::definition_location(defintion_data, file_library);
-        let source = file.source();
-        let rope = Rope::from_str(source);
-
-        Ok(Backend::read_comment(&rope, start)
-            .or_else(|| Some(Backend::definition_summary(defintion_data, file_library)))
-            .map(|x| helpers::simple_hover(x)))
+        Ok(None)
     }
 
     async fn goto_definition(&self, params: GotoDefinitionParams) -> jsonrpc::Result<Option<GotoDefinitionResponse>> {
@@ -544,34 +336,12 @@ impl LanguageServer for Backend {
         let document_map = document_map.borrow();
         let document_data = document_map.get(&uri).expect("document map should have uri on hover");
 
+        Ok(None)
+        /*
         // find what word is selected
-        let Ok(Some((_, word))) = helpers::find_word(&document_data.content, params.text_document_position_params.position) else {
+        let Ok(Some((pos, word))) = parse::find_word(&document_data.content, params.text_document_position_params.position) else {
             return Ok(None);
         };
-
-        let Some(archive) = &document_data.archive else {
-            return Ok(None)
-        };
-        let file_library = &archive.inner.file_library;
-
-        let Some(defintion_data) = Backend::find_definition(&word, &archive) else {
-            return Ok(None);
-        };
-
-        let (file, start) = Backend::definition_location(defintion_data, file_library);
-        let source = file.source();
-        let definition_uri = helpers::string_to_uri(file.name()); 
-        let rope = Rope::from_str(source);
-
-        // currently, the only way to get the position of a defintion in circom
-        // is to get the param position from TemplateData / FunctionData
-        //
-        // this means that start points at the start of a function/template params, not the start
-        // of the function name - which makes the selection of the function name more tedious
-        //
-        // for now, simply disregard since using the start also as the end is safe and still
-        // provides jumping capabilities
-        let end = start /* + word.len() */;
 
         Ok(
             Some(
@@ -579,12 +349,13 @@ impl LanguageServer for Backend {
                     Location {
                         uri: definition_uri,
                         range: Range {
-                            start: helpers::char_to_position(&rope, start).expect("word start should be valid"),
-                            end: helpers::char_to_position(&rope, end).expect("word end should be valid")
+                            start: parse::char_to_position(&rope, start).expect("word start should be valid"),
+                            end: parse::char_to_position(&rope, end).expect("word end should be valid")
                         }
                     }
                 )
             )
         )
+        */
     }
 }

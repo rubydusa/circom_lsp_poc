@@ -1,6 +1,12 @@
 use circom_structure::abstract_syntax_tree::ast;
-use crate::backend::ProgramArchive;
+use circom_structure::template_data::TemplateData;
+use circom_structure::function_data::FunctionData;
+use codespan_reporting::files::SimpleFile;
+use circom_structure::file_definition::FileLibrary;
+
 use num_traits::cast::ToPrimitive;
+
+use crate::wrappers::*;
 
 pub enum ASTNode<'a> {
     Statement(&'a ast::Statement),
@@ -462,4 +468,36 @@ fn iterate_statement_or_expression<'a>(
     }
 
     return Err(statements_or_expressions);
+}
+
+#[derive(Clone, Copy)]
+pub enum DefinitionData<'a> {
+    Template(&'a TemplateData),
+    Function(&'a FunctionData)
+}
+
+pub fn definition_location<'a>(
+    defintion_data: DefinitionData, 
+    file_library: &'a FileLibrary
+) -> (&'a SimpleFile<String, String>, usize) {
+    let (file_id, start) = match defintion_data {
+        DefinitionData::Template(data) => {
+            (data.get_file_id(), data.get_param_location().start)
+        },
+        DefinitionData::Function(data) => {
+            (data.get_file_id(), data.get_param_location().start)
+        },
+    };
+
+    (file_library.to_storage().get(file_id).expect("file_id of definition should be valid"), start)
+}
+
+pub fn find_definition<'a>(name: &str, archive: &'a ProgramArchive) -> Option<DefinitionData<'a>> {
+    if let Some(template_data) = archive.inner.templates.get(name) {
+        Some(DefinitionData::Template(template_data))
+    } else if let Some(function_data) = archive.inner.functions.get(name) {
+        Some(DefinitionData::Function(function_data))
+    } else {
+        None
+    }
 }

@@ -1,5 +1,5 @@
-use ropey::Rope;
 use itertools::Itertools;
+use ropey::Rope;
 use tower_lsp::lsp_types::*;
 
 enum CommentParserState {
@@ -7,12 +7,11 @@ enum CommentParserState {
     MaybeInside,
     JustEntered,
     Inside,
-    MaybeOutside
+    MaybeOutside,
 }
 
 pub fn read_comment(content: &Rope, start: usize) -> Option<String> {
-    read_multi_singleline_comment(content, start)
-        .or(read_multiline_comment(content, start))
+    read_multi_singleline_comment(content, start).or(read_multiline_comment(content, start))
 }
 
 // start is the char index where the keyword starts.
@@ -29,31 +28,31 @@ pub fn read_multiline_comment(content: &Rope, start: usize) -> Option<String> {
         match current_state {
             CommentParserState::Outside => match c {
                 '/' => current_state = CommentParserState::MaybeInside,
-                _ => ()
+                _ => (),
             },
             CommentParserState::MaybeInside => match c {
                 '*' => {
                     current_state = CommentParserState::JustEntered;
                     end_idx = current_idx;
-                },
+                }
                 '/' => (),
-                _ => current_state = CommentParserState::Outside
+                _ => current_state = CommentParserState::Outside,
             },
             CommentParserState::JustEntered => match c {
                 '*' => end_idx = current_idx,
-                _ => current_state = CommentParserState::Inside
-            }
+                _ => current_state = CommentParserState::Inside,
+            },
             CommentParserState::Inside => match c {
                 '*' => {
                     current_state = CommentParserState::MaybeOutside;
                     start_idx = current_idx;
                 }
-                _ => ()
+                _ => (),
             },
             CommentParserState::MaybeOutside => match c {
                 '/' => {
                     let result = content
-                        .slice(start_idx..end_idx-1)
+                        .slice(start_idx..end_idx - 1)
                         .to_string()
                         .lines()
                         .map(|x| x.trim_matches(|c: char| c.is_whitespace() || c == '*'))
@@ -66,11 +65,11 @@ pub fn read_multiline_comment(content: &Rope, start: usize) -> Option<String> {
                         Some(result)
                     } else {
                         None
-                    }
-                },
+                    };
+                }
                 '*' => (),
-                _ => current_state = CommentParserState::Inside
-            }
+                _ => current_state = CommentParserState::Inside,
+            },
         }
 
         current_idx -= 1;
@@ -80,7 +79,9 @@ pub fn read_multiline_comment(content: &Rope, start: usize) -> Option<String> {
 }
 
 pub fn read_multi_singleline_comment(content: &Rope, start: usize) -> Option<String> {
-    let mut current_line_idx = content.try_char_to_line(start).expect("char start index should be valid");
+    let mut current_line_idx = content
+        .try_char_to_line(start)
+        .expect("char start index should be valid");
     let mut first_comment_line = 0;
     let mut last_comment_line = 0;
     let mut entered = false;
@@ -89,11 +90,11 @@ pub fn read_multi_singleline_comment(content: &Rope, start: usize) -> Option<Str
         current_line_idx -= 1;
 
         let line = content.line(current_line_idx);
-        // not converting to &str because it might fail (due to the structue of rope), 
+        // not converting to &str because it might fail (due to the structue of rope),
         // and allocating for each line is wasteful
         let is_line_comment = {
             if line.len_chars() < 2 {
-                false 
+                false
             } else {
                 line.char(0) == '/' && line.char(1) == '/'
             }
@@ -103,12 +104,12 @@ pub fn read_multi_singleline_comment(content: &Rope, start: usize) -> Option<Str
             (false, true) => {
                 entered = true;
                 last_comment_line = current_line_idx;
-            },
+            }
             (true, false) => {
                 first_comment_line = current_line_idx;
                 break;
-            },
-            _ => ()
+            }
+            _ => (),
         }
     }
 
@@ -133,7 +134,8 @@ pub fn read_multi_singleline_comment(content: &Rope, start: usize) -> Option<Str
 
 pub fn find_word(rope: &Rope, position: Position) -> ropey::Result<Option<(usize, String)>> {
     let char_idx = position_to_char(rope, position)?;
-    let char = rope.get_char(char_idx)
+    let char = rope
+        .get_char(char_idx)
         .expect("char_idx should not be out of range since position_to_char guarantees");
 
     if char.is_alphanumeric() {
@@ -181,15 +183,11 @@ pub fn char_to_position(rope: &Rope, idx: usize) -> ropey::Result<Position> {
     let line = u32::try_from(line).unwrap();
     let character = u32::try_from(character).unwrap();
 
-    Ok(Position {
-        line,
-        character
-    })
+    Ok(Position { line, character })
 }
 
 pub fn uri_to_string(uri: &Url) -> String {
-    uri
-        .to_file_path()
+    uri.to_file_path()
         .expect("Invalid text document URI")
         .into_os_string()
         .into_string()
@@ -212,6 +210,6 @@ pub fn string_to_uri(s: &str) -> Url {
 pub fn simple_hover(message: String) -> Hover {
     return Hover {
         contents: HoverContents::Scalar(MarkedString::String(message)),
-        range: None
+        range: None,
     };
 }

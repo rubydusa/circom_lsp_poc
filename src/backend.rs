@@ -3,21 +3,21 @@ use tower_lsp::jsonrpc;
 use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer};
 
-use codespan_reporting::diagnostic::{Severity, LabelStyle};
 use circom_structure::error_definition::Report;
 use circom_structure::file_definition::FileLibrary;
+use codespan_reporting::diagnostic::{LabelStyle, Severity};
 
-use std::sync::Mutex;
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::sync::Mutex;
 
-use crate::parse;
 use crate::ast;
+use crate::parse;
 use crate::wrappers::*;
 
 enum FileLibrarySource {
     ProgramArchive(ProgramArchive),
-    FileLibrary(FileLibrary)
+    FileLibrary(FileLibrary),
 }
 
 #[derive(Debug)]
@@ -32,7 +32,6 @@ struct TextDocumentItem {
     version: Option<i32>,
 }
 
-
 #[derive(Debug)]
 pub struct Backend {
     client: Client,
@@ -40,8 +39,8 @@ pub struct Backend {
 }
 
 impl Backend {
-    pub fn new(client: Client) -> Backend { 
-        Backend { 
+    pub fn new(client: Client) -> Backend {
+        Backend {
             client,
             document_map: Mutex::new(RefCell::new(HashMap::new())),
         }
@@ -58,24 +57,30 @@ impl Backend {
         // logic from the parseing, so it's impossible to run the parser on an intermediate buffer
         let archive = if publish_diagnostics {
             let (reports, file_library_source) = match circom_parser::run_parser(
-                path, 
-                "2.1.5",  // TODO: figure what this version number actually does
+                path,
+                "2.1.5", // TODO: figure what this version number actually does
                 vec![],  // TODO: add linked library support
             ) {
                 Ok((mut archive, mut reports)) => {
-                    let mut type_reports = match circom_type_checker::check_types::check_types(&mut archive) {
-                        Ok(type_reports) => type_reports,
-                        Err(type_reports) => type_reports
-                    };
+                    let mut type_reports =
+                        match circom_type_checker::check_types::check_types(&mut archive) {
+                            Ok(type_reports) => type_reports,
+                            Err(type_reports) => type_reports,
+                        };
                     reports.append(&mut type_reports);
-                    (reports, FileLibrarySource::ProgramArchive(ProgramArchive::new(archive)))
-                },
-                Err((file_library, reports)) => (reports, FileLibrarySource::FileLibrary(file_library))
+                    (
+                        reports,
+                        FileLibrarySource::ProgramArchive(ProgramArchive::new(archive)),
+                    )
+                }
+                Err((file_library, reports)) => {
+                    (reports, FileLibrarySource::FileLibrary(file_library))
+                }
             };
 
             let file_library = match &file_library_source {
                 FileLibrarySource::ProgramArchive(archive) => &archive.inner.file_library,
-                FileLibrarySource::FileLibrary(file_library) => &file_library
+                FileLibrarySource::FileLibrary(file_library) => &file_library,
             };
 
             let diagnostics: Vec<_> = reports
@@ -90,7 +95,10 @@ impl Backend {
                 if uri == params.uri {
                     main_file_diags.push(diagnostic);
                 } else if other_files_diags.contains_key(&uri) {
-                    other_files_diags.get_mut(&uri).expect("other_files_diag should contain uri").push(diagnostic);
+                    other_files_diags
+                        .get_mut(&uri)
+                        .expect("other_files_diag should contain uri")
+                        .push(diagnostic);
                 } else {
                     other_files_diags.insert(uri, vec![diagnostic]);
                 }
@@ -114,49 +122,63 @@ impl Backend {
 
             match file_library_source {
                 FileLibrarySource::ProgramArchive(x) => Some(x),
-                _ => None
+                _ => None,
             }
         } else {
             None
         };
 
-        let document_map = self.document_map.lock().expect("document map mutex poisened");
+        let document_map = self
+            .document_map
+            .lock()
+            .expect("document map mutex poisened");
         // if new archive computed succesfully, insert it.
         // otherwise, use old archive
         let archive = match archive {
             Some(new_archive) => Some(new_archive),
-            None => match document_map.borrow_mut().remove(&params.uri).map(|x| x.archive) {
+            None => match document_map
+                .borrow_mut()
+                .remove(&params.uri)
+                .map(|x| x.archive)
+            {
                 Some(existing_archive) => existing_archive,
-                None => None
-            }
+                None => None,
+            },
         };
 
         let document = DocumentData {
             content: rope,
-            archive
+            archive,
         };
 
         document_map.borrow_mut().insert(params.uri, document);
     }
 
     // file_library is needed to decide in what file does the report occurs
-    fn report_to_diagnostic(report: Report, file_library: &FileLibrary, main_uri: &Url) -> (Diagnostic, Url) {
+    fn report_to_diagnostic(
+        report: Report,
+        file_library: &FileLibrary,
+        main_uri: &Url,
+    ) -> (Diagnostic, Url) {
         let diagnostic = report.to_diagnostic();
 
-        let label = diagnostic.labels.into_iter().reduce(|cur, a| {
-            match (cur.style, a.style) {
+        let label = diagnostic
+            .labels
+            .into_iter()
+            .reduce(|cur, a| match (cur.style, a.style) {
                 (LabelStyle::Primary, LabelStyle::Secondary) => cur,
                 (LabelStyle::Secondary, LabelStyle::Primary) => a,
-                _ => if cur.range.start < a.range.start {
-                    cur
-                } else {
-                    a
+                _ => {
+                    if cur.range.start < a.range.start {
+                        cur
+                    } else {
+                        a
+                    }
                 }
-            }
-        });
+            });
 
         let (url, range) = match label {
-            Some(label) => { 
+            Some(label) => {
                 let simple_file = file_library
                     .to_storage()
                     .get(label.file_id)
@@ -165,45 +187,62 @@ impl Backend {
                 let uri = parse::string_to_uri(simple_file.name());
                 let rope = Rope::from_str(simple_file.source());
 
-                (uri, Range {
-                    start: parse::char_to_position(&rope, label.range.start).expect("valid label range start"),
-                    end: parse::char_to_position(&rope, label.range.end).expect("valid label range end")
-                })
-            },
-            None => (main_uri.clone(), Range {
-                start: Position { line: 0, character: 0 },
-                end: Position { line: 0, character: 0 }
-            })
+                (
+                    uri,
+                    Range {
+                        start: parse::char_to_position(&rope, label.range.start)
+                            .expect("valid label range start"),
+                        end: parse::char_to_position(&rope, label.range.end)
+                            .expect("valid label range end"),
+                    },
+                )
+            }
+            None => (
+                main_uri.clone(),
+                Range {
+                    start: Position {
+                        line: 0,
+                        character: 0,
+                    },
+                    end: Position {
+                        line: 0,
+                        character: 0,
+                    },
+                },
+            ),
         };
 
         let severity = match diagnostic.severity {
             Severity::Bug | Severity::Error => DiagnosticSeverity::ERROR,
             Severity::Warning => DiagnosticSeverity::WARNING,
             Severity::Help => DiagnosticSeverity::HINT,
-            Severity::Note => DiagnosticSeverity::INFORMATION
+            Severity::Note => DiagnosticSeverity::INFORMATION,
         };
 
         let message = diagnostic.message;
 
-        (Diagnostic {
-            range,
-            severity: Some(severity),
-            code: None,
-            code_description: None,
-            source: Some(String::from("circom_lsp")),
-            message,
-            related_information: None,
-            tags: None,
-            data: None
-        }, url)
+        (
+            Diagnostic {
+                range,
+                severity: Some(severity),
+                code: None,
+                code_description: None,
+                source: Some(String::from("circom_lsp")),
+                message,
+                related_information: None,
+                tags: None,
+                data: None,
+            },
+            url,
+        )
     }
 
-    fn other_files_diagnostic(other_files_diags: &HashMap<Url, Vec<Diagnostic>>) -> Option<Diagnostic> {
+    fn other_files_diagnostic(
+        other_files_diags: &HashMap<Url, Vec<Diagnostic>>,
+    ) -> Option<Diagnostic> {
         let locations: String = other_files_diags
             .keys()
-            .map(|uri| {
-                format!("\n{}", parse::uri_to_string(uri))
-            })
+            .map(|uri| format!("\n{}", parse::uri_to_string(uri)))
             .collect();
 
         if locations.is_empty() {
@@ -213,11 +252,11 @@ impl Backend {
                 range: Range {
                     start: Position {
                         line: 0,
-                        character: 0
+                        character: 0,
                     },
                     end: Position {
                         line: 0,
-                        character: 0
+                        character: 0,
                     },
                 },
                 severity: Some(DiagnosticSeverity::ERROR),
@@ -227,7 +266,7 @@ impl Backend {
                 message: format!("errors found in the following files:{}", locations),
                 related_information: None,
                 tags: None,
-                data: None
+                data: None,
             })
         }
     }
@@ -260,18 +299,17 @@ impl LanguageServer for Backend {
     }
 
     async fn did_open(&self, params: DidOpenTextDocumentParams) {
-        self.client
-            .log_message(MessageType::INFO, "Opened!")
-            .await;
+        self.client.log_message(MessageType::INFO, "Opened!").await;
 
         self.on_change(
-            TextDocumentItem { 
+            TextDocumentItem {
                 uri: params.text_document.uri,
                 text: params.text_document.text,
-                version: Some(params.text_document.version)
+                version: Some(params.text_document.version),
             },
-            true
-        ).await;
+            true,
+        )
+        .await;
     }
 
     async fn did_change(&self, params: DidChangeTextDocumentParams) {
@@ -279,17 +317,23 @@ impl LanguageServer for Backend {
             TextDocumentItem {
                 uri: params.text_document.uri,
                 text: params.content_changes[0].text.clone(),
-                version: Some(params.text_document.version)
+                version: Some(params.text_document.version),
             },
-            false
-        ).await;
+            false,
+        )
+        .await;
     }
 
     async fn did_save(&self, params: DidSaveTextDocumentParams) {
         let result = {
-            let document_map = self.document_map.lock().expect("document_map mutex poisened");
+            let document_map = self
+                .document_map
+                .lock()
+                .expect("document_map mutex poisened");
             let document_map = document_map.borrow();
-            document_map.get(&params.text_document.uri).map(|x| x.content.to_string())
+            document_map
+                .get(&params.text_document.uri)
+                .map(|x| x.content.to_string())
         };
 
         match result {
@@ -298,20 +342,26 @@ impl LanguageServer for Backend {
                     TextDocumentItem {
                         uri: params.text_document.uri,
                         text: document,
-                        version: None
+                        version: None,
                     },
-                    true
-                ).await;
-            },
-            None => ()
+                    true,
+                )
+                .await;
+            }
+            None => (),
         };
     }
 
     async fn hover(&self, params: HoverParams) -> jsonrpc::Result<Option<Hover>> {
         let uri = params.text_document_position_params.text_document.uri;
-        let document_map = self.document_map.lock().expect("document_map mutex poisened");
+        let document_map = self
+            .document_map
+            .lock()
+            .expect("document_map mutex poisened");
         let document_map = document_map.borrow();
-        let document_data = document_map.get(&uri).expect("document map should have uri on hover");
+        let document_data = document_map
+            .get(&uri)
+            .expect("document map should have uri on hover");
 
         // find what word is selected
         let Ok(Some((pos, word))) = parse::find_word(&document_data.content, params.text_document_position_params.position) else {
@@ -330,11 +380,19 @@ impl LanguageServer for Backend {
         Ok(None)
     }
 
-    async fn goto_definition(&self, params: GotoDefinitionParams) -> jsonrpc::Result<Option<GotoDefinitionResponse>> {
+    async fn goto_definition(
+        &self,
+        params: GotoDefinitionParams,
+    ) -> jsonrpc::Result<Option<GotoDefinitionResponse>> {
         let uri = params.text_document_position_params.text_document.uri;
-        let document_map = self.document_map.lock().expect("document_map mutex poisened");
+        let document_map = self
+            .document_map
+            .lock()
+            .expect("document_map mutex poisened");
         let document_map = document_map.borrow();
-        let document_data = document_map.get(&uri).expect("document map should have uri on hover");
+        let document_data = document_map
+            .get(&uri)
+            .expect("document map should have uri on hover");
 
         Ok(None)
         /*

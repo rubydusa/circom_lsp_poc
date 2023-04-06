@@ -1,17 +1,22 @@
 use circom_structure::abstract_syntax_tree::ast;
 use circom_structure::template_data::TemplateData;
 use circom_structure::function_data::FunctionData;
-use codespan_reporting::files::SimpleFile;
 use circom_structure::file_definition::FileLibrary;
+use codespan_reporting::files::SimpleFile;
 
 use num_traits::cast::ToPrimitive;
 
 use crate::wrappers::*;
 
-pub enum ASTNode<'a> {
-    Statement(&'a ast::Statement),
-    Expression(&'a ast::Expression),
+pub enum Contender<'a> {
+    StatementOrExpression(StatementOrExpression<'a>),
     Contender(TokenType)
+}
+
+#[derive(Clone, Copy)]
+pub enum StatementOrExpression<'a> {
+    Statement(&'a ast::Statement),
+    Expression(&'a ast::Expression)
 }
 
 #[derive(Debug)]
@@ -50,26 +55,26 @@ pub fn find_token(start: usize, word: &str, file_id: usize, archive: &ProgramArc
     let mut statements_or_expressions = archive.inner.functions.values()
         .filter_map(|x| {
             if x.get_file_id() == file_id {
-                Some(ASTNode::Statement(x.get_body()))
+                Some(Contender::StatementOrExpression(StatementOrExpression::Statement(x.get_body())))
             } else {
                 None
             }
         }).chain(archive.inner.templates.values()
                  .filter_map(|x| {
                      if x.get_file_id() == file_id {
-                         Some(ASTNode::Statement(x.get_body()))
+                         Some(Contender::StatementOrExpression(StatementOrExpression::Statement(x.get_body())))
                      } else {
                          None
                      }
                  }))
     .collect::<Vec<_>>();
 
-    statements_or_expressions.push(ASTNode::Expression(&archive.inner.initial_template_call));
+    statements_or_expressions.push(Contender::StatementOrExpression(StatementOrExpression::Expression(&archive.inner.initial_template_call)));
 
     loop {
         let statement_or_expression = statements_or_expressions.pop()?;
 
-        match iterate_statement_or_expression(start, word, statement_or_expression, archive) {
+        match iterate_contender(start, word, statement_or_expression, archive) {
             Ok(token_type) => break Some(TokenInfo {
                 name: word.to_owned(),
                 token_type
@@ -98,101 +103,238 @@ fn find_definition_type(word: &str, archive: &ProgramArchive) -> DefintionType {
     }
 }
 
-fn iterate_statement_or_expression<'a>(
+fn iterate_contender<'a>(
     start: usize, 
     word: &str, 
-    statement_or_expression: ASTNode<'a>,
+    contender: Contender<'a>,
     archive: &ProgramArchive
-    ) -> Result<TokenType, Vec<ASTNode<'a>>> {
-    let mut statements_or_expressions = Vec::new();
-    match statement_or_expression {
-        ASTNode::Contender(token_type) => {
-            return Ok(token_type)
+    ) -> Result<TokenType, Vec<Contender<'a>>> {
+    match contender {
+        Contender::Contender(token_type) => {
+            Ok(token_type)
         },
-        ASTNode::Statement(statement) => match statement {
-            ast::Statement::IfThenElse { 
-                meta: ast::Meta { start: s_start, end: s_end, .. }, 
-                cond, 
-                if_case, 
-                else_case 
-            } => {
-                if *s_start <= start && start <= *s_end {
-                    statements_or_expressions.push(ASTNode::Expression(cond));
-                    statements_or_expressions.push(ASTNode::Statement(&if_case));
-                    if let Some(else_case) = else_case {
-                        statements_or_expressions.push(ASTNode::Statement(&else_case));
-                    }
-                }
-            },
-            ast::Statement::While { 
-                meta: ast::Meta { start: s_start, end: s_end, ..}, 
-                cond, 
-                stmt 
-            } => {
-                if *s_start <= start && start <= *s_end {
-                    statements_or_expressions.push(ASTNode::Expression(cond));
-                    statements_or_expressions.push(ASTNode::Statement(&stmt));
-                }
-            },
-            ast::Statement::Return { 
-                meta: ast::Meta { start: s_start, end: s_end, ..}, 
-                value
-            } => {
-                if *s_start <= start && start <= *s_end {
-                    statements_or_expressions.push(ASTNode::Expression(value));
-                }
-            },
-            ast::Statement::InitializationBlock { 
-                meta: ast::Meta { start: s_start, end: s_end, ..}, 
-                initializations,
-                ..
-            } => {
-                if *s_start <= start && start <= *s_end {
-                    statements_or_expressions.append(&mut initializations.into_iter()
-                                                     .map(|x| ASTNode::Statement(x))
-                                                     .collect()
-                                                    );
-                }
-            },
-            ast::Statement::Declaration { 
-                meta: ast::Meta { start: s_start, end: s_end, ..}, 
-                xtype,
-                name,
-                dimensions,
-                ..
-            } => {
-                if *s_start <= start && start <= *s_end {
-                    if name == word {
-                        let access = dimensions.into_iter().map(|x| {
-                            match x {
-                                ast::Expression::Number(_, big_int) => Some(AccessType::Num(big_int
-                                    .to_u32()
-                                    .expect("signal array length shouldnt be big")
-                                )),
-                                ast::Expression::Variable { name, .. } => Some(AccessType::Var(name.to_owned())),
-                                _ => None
-                            }
-                        }).collect();
+        Contender::StatementOrExpression(statement_or_expression) => {
+            let mut contenders = Vec::new();
+            let meta = get_meta(statement_or_expression);
+            if !(meta.start <= start && start <= meta.end) {
+                return Err(vec![]);
+            }
 
-                        return Ok(match xtype {
-                            ast::VariableType::Var => TokenType::Variable(access),
-                            ast::VariableType::Signal(..) => TokenType::Signal(access),
-                            ast::VariableType::Component | ast::VariableType::AnonymousComponent => TokenType::Component(access)
-                        });
+            let token_type = match statement_or_expression {
+                StatementOrExpression::Statement(statement) => match statement {
+                    ast::Statement::IfThenElse { 
+                        cond, 
+                        if_case, 
+                        else_case,
+                        ..
+                    } => {
+                        contenders.push(Contender::StatementOrExpression(StatementOrExpression::Expression(cond)));
+                        contenders.push(Contender::StatementOrExpression(StatementOrExpression::Statement(&if_case)));
+                        if let Some(else_case) = else_case {
+                            contenders.push(Contender::StatementOrExpression(StatementOrExpression::Statement(&else_case)));
+                        }
+                        None
+                    },
+                    ast::Statement::While { 
+                        cond, 
+                        stmt,
+                        ..
+                    } => {
+                        contenders.push(Contender::StatementOrExpression(StatementOrExpression::Expression(cond)));
+                        contenders.push(Contender::StatementOrExpression(StatementOrExpression::Statement(&stmt)));
+                        None
+                    },
+                    ast::Statement::Return { 
+                        value,
+                        ..
+                    } => {
+                        contenders.push(Contender::StatementOrExpression(StatementOrExpression::Expression(value)));
+                        None
+                    },
+                    ast::Statement::InitializationBlock { 
+                        initializations,
+                        ..
+                    } => {
+                        contenders.append(&mut initializations.into_iter()
+                                          .map(|x| Contender::StatementOrExpression(StatementOrExpression::Statement(x)))
+                                          .collect()
+                                         );
+                        None
+                    },
+                    ast::Statement::Declaration { 
+                        xtype,
+                        name,
+                        dimensions,
+                        ..
+                    } => {
+                        if name == word {
+                            let access = dimensions.into_iter().map(|x| {
+                                match x {
+                                    ast::Expression::Number(_, big_int) => Some(AccessType::Num(big_int
+                                                                                                .to_u32()
+                                                                                                .expect("signal array length shouldnt be big")
+                                                                                               )),
+                                                                                               ast::Expression::Variable { name, .. } => Some(AccessType::Var(name.to_owned())),
+                                                                                               _ => None
+                                }
+                            }).collect();
+
+                            Some(match xtype {
+                                ast::VariableType::Var => TokenType::Variable(access),
+                                ast::VariableType::Signal(..) => TokenType::Signal(access),
+                                ast::VariableType::Component | ast::VariableType::AnonymousComponent => TokenType::Component(access)
+                            })
+                        } else {
+                            None
+                        }
+                    },
+                    ast::Statement::Substitution { 
+                        var,
+                        op,
+                        rhe,
+                        access,
+                        ..
+                    } => {
+                        // order matters here
+                        if var == word {
+                            let access = access.into_iter()
+                                .take_while(|x| {
+                                    match x {
+                                        ast::Access::ArrayAccess(_) => true,
+                                        _ => false
+                                    }
+                                })
+                            .map(|x| {
+                                match x {
+                                    ast::Access::ArrayAccess(e) => match e {
+                                        ast::Expression::Number(_, big_int) => Some(AccessType::Num(big_int
+                                                                                                    .to_u32()
+                                                                                                    .expect("signal array length shouldnt be big"))),
+                                                                                                    ast::Expression::Variable { name, .. } => Some(AccessType::Var(name.to_owned())),
+                                                                                                    _ => None
+                                    },
+                                    _ => unreachable!()
+                                }
+                            })
+                            .collect();
+                            let token_type = match op {
+                                ast::AssignOp::AssignVar => match rhe {
+                                    ast::Expression::AnonymousComp { .. } => TokenType::Component(access),
+                                    ast::Expression::Call { id, .. } => match find_definition_type(id, archive) {
+                                        DefintionType::Template => TokenType::Component(access),
+                                        DefintionType::Function => TokenType::Variable(access)
+                                    }
+                                    _ => TokenType::Variable(access)
+                                },
+                                ast::AssignOp::AssignSignal | ast::AssignOp::AssignConstraintSignal => TokenType::Signal(access)
+                            };
+                            contenders.push(Contender::Contender(token_type));
+                        }
+                        contenders.push(Contender::StatementOrExpression(StatementOrExpression::Expression(rhe)));
+                        None
+                    },
+                    ast::Statement::MultSubstitution { 
+                        lhe,
+                        rhe,
+                        ..
+                    } => {
+                        contenders.push(Contender::StatementOrExpression(StatementOrExpression::Expression(lhe)));
+                        contenders.push(Contender::StatementOrExpression(StatementOrExpression::Expression(rhe)));
+                        None
+                    },
+                    ast::Statement::UnderscoreSubstitution { 
+                        rhe,
+                        ..
+                    } => {
+                        contenders.push(Contender::StatementOrExpression(StatementOrExpression::Expression(rhe)));
+                        None
+                    },
+                    ast::Statement::ConstraintEquality { 
+                        lhe,
+                        rhe,
+                        ..
+                    } => {
+                        contenders.push(Contender::StatementOrExpression(StatementOrExpression::Expression(lhe)));
+                        contenders.push(Contender::StatementOrExpression(StatementOrExpression::Expression(rhe)));
+                        None
+                    },
+                    ast::Statement::LogCall { 
+                        args,
+                        ..
+                    } => {
+                        let mut args_processed = args.into_iter()
+                            .filter_map(|x| {
+                                match x {
+                                    ast::LogArgument::LogExp(exp) => Some(Contender::StatementOrExpression(StatementOrExpression::Expression(exp))),
+                                    _ => None
+                                }
+                            })
+                        .collect();
+
+                        contenders.append(&mut args_processed);
+                        None
+                    },
+                    ast::Statement::Block {
+                        stmts,
+                        ..
+                    } => {
+                        contenders.append(&mut stmts.into_iter()
+                                          .map(|x| Contender::StatementOrExpression(StatementOrExpression::Statement(x)))
+                                          .collect()
+                                         );
+                        None
+                    },
+                    ast::Statement::Assert { 
+                        meta, 
+                        arg 
+                    } => {
+                        contenders.push(Contender::StatementOrExpression(StatementOrExpression::Expression(arg)));
+                        None
                     }
-                }
-            },
-            ast::Statement::Substitution { 
-                meta: ast::Meta { start: s_start, end: s_end, ..}, 
-                var,
-                op,
-                rhe,
-                access,
-                ..
-            } => {
-                if *s_start <= start && start <= *s_end {
-                    // order matters here
-                    if var == word {
+                },
+                StatementOrExpression::Expression(expression) => match expression {
+                    ast::Expression::InfixOp { 
+                        lhe,
+                        rhe,
+                        ..
+                    } => {
+                        contenders.push(Contender::StatementOrExpression(StatementOrExpression::Expression(lhe)));
+                        contenders.push(Contender::StatementOrExpression(StatementOrExpression::Expression(rhe)));
+                        None
+                    },
+                    ast::Expression::PrefixOp { 
+                        rhe,
+                        ..
+                    } => {
+                        contenders.push(Contender::StatementOrExpression(StatementOrExpression::Expression(rhe)));
+                        None
+                    },
+                    ast::Expression::InlineSwitchOp { 
+                        cond,
+                        if_true,
+                        if_false,
+                        ..
+                    } => {
+                        contenders.push(Contender::StatementOrExpression(StatementOrExpression::Expression(cond)));
+                        contenders.push(Contender::StatementOrExpression(StatementOrExpression::Expression(if_true)));
+                        contenders.push(Contender::StatementOrExpression(StatementOrExpression::Expression(if_false)));
+                        None
+                    },
+                    ast::Expression::ParallelOp { 
+                        rhe,
+                        ..
+                    } => {
+                        contenders.push(Contender::StatementOrExpression(StatementOrExpression::Expression(rhe)));
+                        None
+                    },
+                    ast::Expression::Variable { 
+                        name,
+                        access,
+                        ..
+                    } => {
+                        // TODO: get_reduces_to panics by default, make it so it can print custom error
+                        // message depending on where reduction failed
+                        let type_reduction = meta.get_type_knowledge().get_reduces_to();
                         let access = access.into_iter()
                             .take_while(|x| {
                                 match x {
@@ -200,274 +342,217 @@ fn iterate_statement_or_expression<'a>(
                                     _ => false
                                 }
                             })
-                            .map(|x| {
-                                match x {
-                                    ast::Access::ArrayAccess(e) => match e {
-                                        ast::Expression::Number(_, big_int) => Some(AccessType::Num(big_int
-                                            .to_u32()
-                                            .expect("signal array length shouldnt be big"))),
-                                        ast::Expression::Variable { name, .. } => Some(AccessType::Var(name.to_owned())),
-                                        _ => None
-                                    },
-                                    _ => unreachable!()
-                                }
-                            })
-                            .collect();
-                        let token_type = match op {
-                            ast::AssignOp::AssignVar => match rhe {
-                                ast::Expression::AnonymousComp { .. } => TokenType::Component(access),
-                                ast::Expression::Call { id, .. } => match find_definition_type(id, archive) {
-                                    DefintionType::Template => TokenType::Component(access),
-                                    DefintionType::Function => TokenType::Variable(access)
-                                }
-                                _ => TokenType::Variable(access)
-                            },
-                            ast::AssignOp::AssignSignal | ast::AssignOp::AssignConstraintSignal => TokenType::Signal(access)
-                        };
-                        statements_or_expressions.push(ASTNode::Contender(token_type));
-                    }
-                    statements_or_expressions.push(ASTNode::Expression(rhe));
-                }
-            },
-            ast::Statement::MultSubstitution { 
-                meta: ast::Meta { start: s_start, end: s_end, ..}, 
-                lhe,
-                rhe,
-                ..
-            } => {
-                if *s_start <= start && start <= *s_end {
-                    statements_or_expressions.push(ASTNode::Expression(lhe));
-                    statements_or_expressions.push(ASTNode::Expression(rhe));
-                }
-            },
-            ast::Statement::UnderscoreSubstitution { 
-                meta: ast::Meta { start: s_start, end: s_end, ..}, 
-                rhe,
-                ..
-            } => {
-                if *s_start <= start && start <= *s_end {
-                    statements_or_expressions.push(ASTNode::Expression(rhe));
-                }
-            },
-            ast::Statement::ConstraintEquality { 
-                meta: ast::Meta { start: s_start, end: s_end, ..}, 
-                lhe,
-                rhe,
-                ..
-            } => {
-                if *s_start <= start && start <= *s_end {
-                    statements_or_expressions.push(ASTNode::Expression(lhe));
-                    statements_or_expressions.push(ASTNode::Expression(rhe));
-                }
-            },
-            ast::Statement::LogCall { 
-                meta: ast::Meta { start: s_start, end: s_end, ..}, 
-                args
-            } => {
-                if *s_start <= start && start <= *s_end {
-                    let mut args_processed = args.into_iter()
-                        .filter_map(|x| {
-                            match x {
-                                ast::LogArgument::LogExp(exp) => Some(ASTNode::Expression(exp)),
-                                _ => None
-                            }
-                        })
-                    .collect();
-
-                    statements_or_expressions.append(&mut args_processed);
-                }
-            },
-            ast::Statement::Block {
-                meta: ast::Meta { start: s_start, end: s_end, .. },
-                stmts
-            } => {
-                if *s_start <= start && start <= *s_end {
-                    statements_or_expressions.append(&mut stmts.into_iter()
-                                                     .map(|x| ASTNode::Statement(x))
-                                                     .collect()
-                                                    );
-                }
-            },
-            ast::Statement::Assert { 
-                meta: ast::Meta { start: s_start, end: s_end, .. }, 
-                arg 
-            } => {
-                if *s_start <= start && start <= *s_end {
-                    statements_or_expressions.push(ASTNode::Expression(arg));
-                }
-            }
-        },
-        ASTNode::Expression(expression) => match expression {
-            ast::Expression::InfixOp { 
-                meta: ast::Meta { start: s_start, end: s_end, .. }, 
-                lhe,
-                rhe,
-                ..
-            } => {
-                if *s_start <= start && start <= *s_end {
-                    statements_or_expressions.push(ASTNode::Expression(lhe));
-                    statements_or_expressions.push(ASTNode::Expression(rhe));
-                }
-            },
-            ast::Expression::PrefixOp { 
-                meta: ast::Meta { start: s_start, end: s_end, .. }, 
-                rhe,
-                ..
-            } => {
-                if *s_start <= start && start <= *s_end {
-                    statements_or_expressions.push(ASTNode::Expression(rhe));
-                }
-            },
-            ast::Expression::InlineSwitchOp { 
-                meta: ast::Meta { start: s_start, end: s_end, .. }, 
-                cond,
-                if_true,
-                if_false
-            } => {
-                if *s_start <= start && start <= *s_end {
-                    statements_or_expressions.push(ASTNode::Expression(cond));
-                    statements_or_expressions.push(ASTNode::Expression(if_true));
-                    statements_or_expressions.push(ASTNode::Expression(if_false));
-                }
-            },
-            ast::Expression::ParallelOp { 
-                meta: ast::Meta { start: s_start, end: s_end, .. }, 
-                rhe
-            } => {
-                if *s_start <= start && start <= *s_end {
-                    statements_or_expressions.push(ASTNode::Expression(rhe));
-                }
-            },
-            ast::Expression::Variable { 
-                meta,
-                name,
-                access,
-                ..
-            } => {
-                let ast::Meta { start: s_start, end: s_end, .. } = meta;
-                if *s_start <= start && start <= *s_end {
-                    // TODO: get_reduces_to panics by default, make it so it can print custom error
-                    // message depending on where reduction failed
-                    let type_reduction = meta.get_type_knowledge().get_reduces_to();
-                    let access = access.into_iter()
-                        .take_while(|x| {
-                            match x {
-                                ast::Access::ArrayAccess(_) => true,
-                                _ => false
-                            }
-                        })
                         .map(|x| {
                             match x {
                                 ast::Access::ArrayAccess(e) => match e {
                                     ast::Expression::Number(_, big_int) => Some(AccessType::Num(big_int
-                                        .to_u32()
-                                        .expect("signal array length shouldnt be big"))),
-                                    ast::Expression::Variable { name, .. } => Some(AccessType::Var(name.to_owned())),
-                                    _ => None
+                                                                                                .to_u32()
+                                                                                                .expect("signal array length shouldnt be big"))),
+                                                                                                ast::Expression::Variable { name, .. } => Some(AccessType::Var(name.to_owned())),
+                                                                                                _ => None
                                 },
                                 _ => unreachable!()
                             }
                         })
                         .collect();
 
-                    if word == name {
-                        return Ok(match type_reduction {
-                            ast::TypeReduction::Variable => TokenType::Variable(access),
-                            ast::TypeReduction::Component => TokenType::Component(access),
-                            ast::TypeReduction::Signal => TokenType::Signal(access),
-                            ast::TypeReduction::Tag => TokenType::Tag
-                        });
-                    }
-                }
-            },
-            ast::Expression::Call { 
-                meta: ast::Meta { start: s_start, end: s_end, .. }, 
-                id,
-                args
-            } => {
-                if *s_start <= start && start <= *s_end {
-                    // order matters here
-                    if id == word {
-                        statements_or_expressions.push(
-                            ASTNode::Contender(
-                                TokenType::Defintion(find_definition_type(word, archive))
-                                )
-                            );
-                    }
+                        if word == name {
+                            Some(match type_reduction {
+                                ast::TypeReduction::Variable => TokenType::Variable(access),
+                                ast::TypeReduction::Component => TokenType::Component(access),
+                                ast::TypeReduction::Signal => TokenType::Signal(access),
+                                ast::TypeReduction::Tag => TokenType::Tag
+                            })
+                        } else {
+                            None
+                        }
+                    },
+                    ast::Expression::Call { 
+                        id,
+                        args,
+                        ..
+                    } => {
+                        // order matters here
+                        if id == word {
+                            contenders.push(
+                                Contender::Contender(
+                                    TokenType::Defintion(find_definition_type(word, archive))
+                                    )
+                                );
+                        }
 
-                    let mut args_processed = args.into_iter()
-                        .map(|x| ASTNode::Expression(x))
-                        .collect();
+                        let mut args_processed = args.into_iter()
+                            .map(|x| Contender::StatementOrExpression(StatementOrExpression::Expression(x)))
+                            .collect();
 
-                    statements_or_expressions.append(&mut args_processed);
-                }
-            },
-            ast::Expression::AnonymousComp { 
-                meta: ast::Meta { start: s_start, end: s_end, .. }, 
-                id,
-                params,
-                signals,
-                ..
-            } => {
-                if *s_start <= start && start <= *s_end {
-                    // order matters here
-                    if id == word {
-                        statements_or_expressions.push(
-                            ASTNode::Contender(
-                                TokenType::Defintion(find_definition_type(word, archive)))
-                            );
-                    }
+                        contenders.append(&mut args_processed);
+                        None
+                    },
+                    ast::Expression::AnonymousComp { 
+                        id,
+                        params,
+                        signals,
+                        ..
+                    } => {
+                        // order matters here
+                        if id == word {
+                            contenders.push(
+                                Contender::Contender(
+                                    TokenType::Defintion(find_definition_type(word, archive)))
+                                );
+                        }
 
-                    let mut params_processed = params.into_iter()
-                        .map(|x| ASTNode::Expression(x))
-                        .collect();
-                    let mut signals_processed = signals.into_iter()
-                        .map(|x| ASTNode::Expression(x))
-                        .collect();
+                        let mut params_processed = params.into_iter()
+                            .map(|x| Contender::StatementOrExpression(StatementOrExpression::Expression(x)))
+                            .collect();
+                        let mut signals_processed = signals.into_iter()
+                            .map(|x| Contender::StatementOrExpression(StatementOrExpression::Expression(x)))
+                            .collect();
 
-                    statements_or_expressions.append(&mut params_processed);
-                    statements_or_expressions.append(&mut signals_processed);
-                }
-            },
-            ast::Expression::ArrayInLine { 
-                meta: ast::Meta { start: s_start, end: s_end, .. }, 
-                values
-            } => {
-                if *s_start <= start && start <= *s_end {
-                    let mut values_processed = values.into_iter()
-                        .map(|x| ASTNode::Expression(x))
-                        .collect();
+                        contenders.append(&mut params_processed);
+                        contenders.append(&mut signals_processed);
+                        None
+                    },
+                    ast::Expression::ArrayInLine { 
+                        values,
+                        ..
+                    } => {
+                        let mut values_processed = values.into_iter()
+                            .map(|x| Contender::StatementOrExpression(StatementOrExpression::Expression(x)))
+                            .collect();
 
-                    statements_or_expressions.append(&mut values_processed);
-                }
-            },
-            ast::Expression::Tuple { 
-                meta: ast::Meta { start: s_start, end: s_end, .. }, 
-                values
-            } => {
-                if *s_start <= start && start <= *s_end {
-                    let mut values_processed = values.into_iter()
-                        .map(|x| ASTNode::Expression(x))
-                        .collect();
+                        contenders.append(&mut values_processed);
+                        None
+                    },
+                    ast::Expression::Tuple { 
+                        values,
+                        ..
+                    } => {
+                        let mut values_processed = values.into_iter()
+                            .map(|x| Contender::StatementOrExpression(StatementOrExpression::Expression(x)))
+                            .collect();
 
-                    statements_or_expressions.append(&mut values_processed);
+                        contenders.append(&mut values_processed);
+                        None
+                    },
+                    ast::Expression::UniformArray { 
+                        value,
+                        dimension,
+                        ..
+                    } => {
+                        contenders.push(Contender::StatementOrExpression(StatementOrExpression::Expression(dimension)));
+                        contenders.push(Contender::StatementOrExpression(StatementOrExpression::Expression(value)));
+                        None
+                    },
+                    _ => None
                 }
-            },
-            ast::Expression::UniformArray { 
-                meta: ast::Meta { start: s_start, end: s_end, .. }, 
-                value,
-                dimension
-            } => {
-                if *s_start <= start && start <= *s_end {
-                    statements_or_expressions.push(ASTNode::Expression(dimension));
-                    statements_or_expressions.push(ASTNode::Expression(value));
-                }
-            },
-                _ => ()
+            };
+
+            if let Some(token_type) = token_type {
+                Ok(token_type)
+            } else {
+                Err(contenders)
+            }
         }
     }
+}
 
-    return Err(statements_or_expressions);
+fn get_meta<'a>(statement_or_expression: StatementOrExpression<'a>) -> &'a ast::Meta {
+    match statement_or_expression {
+        StatementOrExpression::Statement(x) => match x {
+            ast::Statement::IfThenElse { 
+                meta,
+                ..
+            } => meta,
+            ast::Statement::While { 
+                meta,
+                ..
+            } => meta,
+            ast::Statement::Return { 
+                meta,
+                ..
+            } => meta,
+            ast::Statement::InitializationBlock { 
+                meta,
+                ..
+            } => meta,
+            ast::Statement::Declaration { 
+                meta,
+                ..
+            } => meta,
+            ast::Statement::Substitution { 
+                meta,
+                ..
+            } => meta,
+            ast::Statement::MultSubstitution { 
+                meta,
+                ..
+            } => meta,
+            ast::Statement::UnderscoreSubstitution { 
+                meta,
+                ..
+            } => meta,
+            ast::Statement::ConstraintEquality { 
+                meta,
+                ..
+            } => meta,
+            ast::Statement::LogCall { 
+                meta,
+                ..
+            } => meta,
+            ast::Statement::Block {
+                meta,
+                ..
+            } => meta,
+            ast::Statement::Assert { 
+                meta,
+                ..
+            } => meta 
+        },
+        StatementOrExpression::Expression(x) => match x {
+            ast::Expression::InfixOp { 
+                meta,
+                ..
+            } => meta,
+            ast::Expression::PrefixOp { 
+                meta,
+                ..
+            } => meta,
+            ast::Expression::InlineSwitchOp { 
+                meta,
+                ..
+            } => meta,
+            ast::Expression::ParallelOp { 
+                meta,
+                ..
+            } => meta,
+            ast::Expression::Variable { 
+                meta,
+                ..
+            } => meta,
+            ast::Expression::Number(meta, _) => meta,
+            ast::Expression::Call { 
+                meta,
+                ..
+            } => meta,
+            ast::Expression::AnonymousComp { 
+                meta,
+                ..
+            } => meta,
+            ast::Expression::ArrayInLine { 
+                meta,
+                ..
+            } => meta,
+            ast::Expression::Tuple { 
+                meta,
+                ..
+            } => meta,
+            ast::Expression::UniformArray { 
+                meta,
+                ..
+            } => meta,
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -479,7 +564,7 @@ pub enum DefinitionData<'a> {
 pub fn definition_location<'a>(
     defintion_data: DefinitionData, 
     file_library: &'a FileLibrary
-) -> (&'a SimpleFile<String, String>, usize) {
+    ) -> (&'a SimpleFile<String, String>, usize) {
     let (file_id, start) = match defintion_data {
         DefinitionData::Template(data) => {
             (data.get_file_id(), data.get_param_location().start)

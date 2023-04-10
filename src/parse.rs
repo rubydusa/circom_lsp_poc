@@ -186,6 +186,16 @@ pub fn char_to_position(rope: &Rope, idx: usize) -> ropey::Result<Position> {
     Ok(Position { line, character })
 }
 
+pub fn char_range_to_position_range(
+    rope: &Rope,
+    range: std::ops::Range<usize>,
+) -> ropey::Result<Range> {
+    Ok(Range {
+        start: char_to_position(rope, range.start)?,
+        end: char_to_position(rope, range.end)?,
+    })
+}
+
 pub fn uri_to_string(uri: &Url) -> String {
     uri.to_file_path()
         .expect("Invalid text document URI")

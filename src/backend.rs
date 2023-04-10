@@ -373,11 +373,13 @@ impl LanguageServer for Backend {
         };
 
         // TODO: A better way to relate between URI and file_id
+        /*
         if let Some(token_info) = ast::find_token(pos, &word, archive.inner.file_id_main, archive) {
             return Ok(Some(parse::simple_hover(token_info.description())));
         }
+        */
 
-        Ok(None)
+        Ok(ast::find_token(pos, &word, archive.inner.file_id_main, archive).map(|x| x.to_hover()))
     }
 
     async fn goto_definition(

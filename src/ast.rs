@@ -1,4 +1,5 @@
 use ropey::Rope;
+use tower_lsp::lsp_types;
 
 use circom_structure::abstract_syntax_tree::ast;
 use circom_structure::file_definition::FileLibrary;
@@ -6,9 +7,9 @@ use circom_structure::function_data::FunctionData;
 use circom_structure::template_data::TemplateData;
 use codespan_reporting::files::SimpleFile;
 
-use std::ops::Range;
-
 use num_traits::cast::ToPrimitive;
+
+use std::fmt;
 
 use crate::parse;
 use crate::wrappers::*;
@@ -26,9 +27,9 @@ pub enum StatementOrExpression<'a> {
 
 #[derive(Debug)]
 pub enum TokenType {
-    Variable(Vec<Option<AccessType>>),
-    Signal(Vec<Option<AccessType>>),
-    Component(Vec<Option<AccessType>>),
+    Variable(Access),
+    Signal(Access),
+    Component(Access),
     Defintion(DefinitionType),
     Tag,
 }
@@ -38,6 +39,9 @@ pub enum DefinitionType {
     Template,
     Function,
 }
+
+#[derive(Debug)]
+pub struct Access(Vec<Option<AccessType>>);
 
 #[derive(Debug)]
 pub enum AccessType {
@@ -54,7 +58,7 @@ pub enum DefinitionData<'a> {
 pub struct TokenInfo {
     name: String,
     token_type: TokenType,
-    location: Range<usize>,
+    location: lsp_types::Range,
     docs: Option<String>,
 }
 
@@ -64,8 +68,10 @@ impl TokenInfo {
         token_type: TokenType,
         meta: &ast::Meta,
         archive: &ProgramArchive,
+        document: &Rope,
     ) -> TokenInfo {
-        let location = meta.start..meta.end;
+        let location = parse::char_range_to_position_range(document, meta.start..meta.end)
+            .expect("unmatching document");
         let docs = get_docs(&name, archive);
 
         TokenInfo {
@@ -79,24 +85,32 @@ impl TokenInfo {
     pub fn try_new_defintion(
         name: String,
         archive: &ProgramArchive,
-        start: usize
+        document: &Rope,
+        start: usize,
     ) -> Option<TokenInfo> {
-        find_definition_type(&name, archive)
-            .map(|token_type| {
-                let location = start..(start + name.len());
-                let docs = get_docs(&name, archive);
+        find_definition_type(&name, archive).map(|token_type| {
+            let location =
+                parse::char_range_to_position_range(document, start..(start + name.len()))
+                    .expect("unmatching document");
+            let docs = get_docs(&name, archive);
 
-                TokenInfo {
-                    name,
-                    token_type: TokenType::Defintion(token_type),
-                    location,
-                    docs
-                }
-            })
+            TokenInfo {
+                name,
+                token_type: TokenType::Defintion(token_type),
+                location,
+                docs,
+            }
+        })
     }
 
-    pub fn description(&self) -> String {
-        format!("{}: {:?}, docs: {}", self.name, self.token_type, self.docs.clone().unwrap_or_else(|| "no docs".to_string()))
+    pub fn to_hover(&self) -> lsp_types::Hover {
+        let range = Some(self.location.clone());
+        let contents = lsp_types::HoverContents::Markup(lsp_types::MarkupContent {
+            kind: lsp_types::MarkupKind::Markdown,
+            value: format!("{}", &self),
+        });
+
+        lsp_types::Hover { range, contents }
     }
 }
 
@@ -106,6 +120,16 @@ pub fn find_token(
     file_id: usize,
     archive: &ProgramArchive,
 ) -> Option<TokenInfo> {
+    let document = Rope::from_str(
+        archive
+            .inner
+            .file_library
+            .to_storage()
+            .get(file_id)
+            .expect("invalid file_id in find_token")
+            .source(),
+    );
+
     let mut statements_or_expressions = archive
         .inner
         .functions
@@ -139,7 +163,7 @@ pub fn find_token(
             break None
         };
 
-        match iterate_contender(start, word, statement_or_expression, archive) {
+        match iterate_contender(start, word, statement_or_expression, archive, &document) {
             Ok(token_info) => {
                 break Some(token_info);
             }
@@ -149,7 +173,7 @@ pub fn find_token(
         }
     };
 
-    result.or_else(|| TokenInfo::try_new_defintion(word.to_owned(), archive, start))
+    result.or_else(|| TokenInfo::try_new_defintion(word.to_owned(), archive, &document, start))
 }
 
 fn iterate_contender<'a>(
@@ -157,6 +181,7 @@ fn iterate_contender<'a>(
     word: &str,
     contender: Contender<'a>,
     archive: &ProgramArchive,
+    document: &Rope,
 ) -> Result<TokenInfo, Vec<Contender<'a>>> {
     match contender {
         Contender::Contender(token_info) => Ok(token_info),
@@ -225,20 +250,24 @@ fn iterate_contender<'a>(
                         ..
                     } => {
                         if name == word {
-                            let access = dimensions
-                                .into_iter()
-                                .map(|x| match x {
-                                    ast::Expression::Number(_, big_int) => Some(AccessType::Num(
-                                        big_int
-                                            .to_u32()
-                                            .expect("signal array length shouldnt be big"),
-                                    )),
-                                    ast::Expression::Variable { name, .. } => {
-                                        Some(AccessType::Var(name.to_owned()))
-                                    }
-                                    _ => None,
-                                })
-                                .collect();
+                            let access = Access(
+                                dimensions
+                                    .into_iter()
+                                    .map(|x| match x {
+                                        ast::Expression::Number(_, big_int) => {
+                                            Some(AccessType::Num(
+                                                big_int
+                                                    .to_u32()
+                                                    .expect("signal array length shouldnt be big"),
+                                            ))
+                                        }
+                                        ast::Expression::Variable { name, .. } => {
+                                            Some(AccessType::Var(name.to_owned()))
+                                        }
+                                        _ => None,
+                                    })
+                                    .collect(),
+                            );
 
                             Some(match xtype {
                                 ast::VariableType::Var => TokenType::Variable(access),
@@ -261,29 +290,30 @@ fn iterate_contender<'a>(
                     } => {
                         // order matters here
                         if var == word {
-                            let access = access
-                                .into_iter()
-                                .take_while(|x| match x {
-                                    ast::Access::ArrayAccess(_) => true,
-                                    _ => false,
-                                })
-                                .map(|x| match x {
-                                    ast::Access::ArrayAccess(e) => match e {
-                                        ast::Expression::Number(_, big_int) => {
-                                            Some(AccessType::Num(
-                                                big_int
-                                                    .to_u32()
-                                                    .expect("signal array length shouldnt be big"),
-                                            ))
-                                        }
-                                        ast::Expression::Variable { name, .. } => {
-                                            Some(AccessType::Var(name.to_owned()))
-                                        }
-                                        _ => None,
-                                    },
-                                    _ => unreachable!(),
-                                })
-                                .collect();
+                            let access =
+                                Access(
+                                    access
+                                        .into_iter()
+                                        .take_while(|x| match x {
+                                            ast::Access::ArrayAccess(_) => true,
+                                            _ => false,
+                                        })
+                                        .map(|x| match x {
+                                            ast::Access::ArrayAccess(e) => match e {
+                                                ast::Expression::Number(_, big_int) => {
+                                                    Some(AccessType::Num(big_int.to_u32().expect(
+                                                        "signal array length shouldnt be big",
+                                                    )))
+                                                }
+                                                ast::Expression::Variable { name, .. } => {
+                                                    Some(AccessType::Var(name.to_owned()))
+                                                }
+                                                _ => None,
+                                            },
+                                            _ => unreachable!(),
+                                        })
+                                        .collect(),
+                                );
                             let token_type = match op {
                                 ast::AssignOp::AssignVar => match rhe {
                                     ast::Expression::AnonymousComp { .. } => {
@@ -311,6 +341,7 @@ fn iterate_contender<'a>(
                                 token_type,
                                 meta,
                                 archive,
+                                document,
                             )));
                         }
                         contenders.push(Contender::StatementOrExpression(
@@ -421,27 +452,31 @@ fn iterate_contender<'a>(
                         // TODO: get_reduces_to panics by default, make it so it can print custom error
                         // message depending on where reduction failed
                         let type_reduction = meta.get_type_knowledge().get_reduces_to();
-                        let access = access
-                            .into_iter()
-                            .take_while(|x| match x {
-                                ast::Access::ArrayAccess(_) => true,
-                                _ => false,
-                            })
-                            .map(|x| match x {
-                                ast::Access::ArrayAccess(e) => match e {
-                                    ast::Expression::Number(_, big_int) => Some(AccessType::Num(
-                                        big_int
-                                            .to_u32()
-                                            .expect("signal array length shouldnt be big"),
-                                    )),
-                                    ast::Expression::Variable { name, .. } => {
-                                        Some(AccessType::Var(name.to_owned()))
-                                    }
-                                    _ => None,
-                                },
-                                _ => unreachable!(),
-                            })
-                            .collect();
+                        let access = Access(
+                            access
+                                .into_iter()
+                                .take_while(|x| match x {
+                                    ast::Access::ArrayAccess(_) => true,
+                                    _ => false,
+                                })
+                                .map(|x| match x {
+                                    ast::Access::ArrayAccess(e) => match e {
+                                        ast::Expression::Number(_, big_int) => {
+                                            Some(AccessType::Num(
+                                                big_int
+                                                    .to_u32()
+                                                    .expect("signal array length shouldnt be big"),
+                                            ))
+                                        }
+                                        ast::Expression::Variable { name, .. } => {
+                                            Some(AccessType::Var(name.to_owned()))
+                                        }
+                                        _ => None,
+                                    },
+                                    _ => unreachable!(),
+                                })
+                                .collect(),
+                        );
 
                         if word == name {
                             Some(match type_reduction {
@@ -465,6 +500,7 @@ fn iterate_contender<'a>(
                                 ),
                                 meta,
                                 archive,
+                                document,
                             )));
                         }
 
@@ -496,6 +532,7 @@ fn iterate_contender<'a>(
                                 ),
                                 meta,
                                 archive,
+                                document,
                             )));
                         }
 
@@ -562,7 +599,13 @@ fn iterate_contender<'a>(
             };
 
             if let Some(token_type) = token_type {
-                Ok(TokenInfo::new(word.to_owned(), token_type, meta, archive))
+                Ok(TokenInfo::new(
+                    word.to_owned(),
+                    token_type,
+                    meta,
+                    archive,
+                    document,
+                ))
             } else {
                 Err(contenders)
             }
@@ -645,5 +688,65 @@ fn get_meta<'a>(statement_or_expression: StatementOrExpression<'a>) -> &'a ast::
             ast::Expression::Tuple { meta, .. } => meta,
             ast::Expression::UniformArray { meta, .. } => meta,
         },
+    }
+}
+
+impl fmt::Display for TokenInfo {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        if let Some(docs) = &self.docs {
+            write!(f, "{}: {}\n---\n{}", self.name, self.token_type, docs)
+        } else {
+            write!(f, "{}: {}", self.name, self.token_type)
+        }
+    }
+}
+
+impl fmt::Display for TokenType {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            TokenType::Variable(access) => write!(f, "Variable{}", access),
+            TokenType::Signal(access) => write!(f, "Signal{}", access),
+            TokenType::Component(access) => write!(f, "Component{}", access),
+            TokenType::Defintion(defintion_type) => write!(f, "{}", defintion_type),
+            TokenType::Tag => write!(f, "Tag"),
+        }
+    }
+}
+
+impl fmt::Display for DefinitionType {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            DefinitionType::Template => write!(f, "Template"),
+            DefinitionType::Function => write!(f, "Function"),
+        }
+    }
+}
+
+impl fmt::Display for Access {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        if self.0.is_empty() {
+            write!(f, "")
+        } else {
+            let as_str_vector = self
+                .0
+                .iter()
+                .map(|x| match x {
+                    Some(x) => format!("{}", x),
+                    None => "_".to_string(),
+                })
+                .collect::<Vec<_>>();
+
+            // TODO: do not rely on debug representation of vectors
+            write!(f, "{:?}", as_str_vector)
+        }
+    }
+}
+
+impl fmt::Display for AccessType {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            AccessType::Num(x) => write!(f, "{}", x),
+            AccessType::Var(x) => write!(f, "{}", x),
+        }
     }
 }

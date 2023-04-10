@@ -21,3 +21,4 @@
 ## Backburner
 - [ ] test tag support
 - [ ] defintions should show params, templates show input and output signals
+- [ ] neovim lsp client shows extra spaces when escaping characters in result (hypothesis: the server under the hood returns the suspected amount of characters the message should take and server doesn't account for escapes)

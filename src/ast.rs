@@ -105,10 +105,7 @@ impl TokenInfo {
 
     pub fn to_hover(&self) -> lsp_types::Hover {
         let range = Some(self.location.clone());
-        let contents = lsp_types::HoverContents::Markup(lsp_types::MarkupContent {
-            kind: lsp_types::MarkupKind::Markdown,
-            value: format!("{}", &self),
-        });
+        let contents = lsp_types::HoverContents::Scalar(lsp_types::MarkedString::String(format!("{}", &self)))
 
         lsp_types::Hover { range, contents }
     }
@@ -727,17 +724,16 @@ impl fmt::Display for Access {
         if self.0.is_empty() {
             write!(f, "")
         } else {
-            let as_str_vector = self
+            let access = self
                 .0
                 .iter()
                 .map(|x| match x {
-                    Some(x) => format!("{}", x),
-                    None => "_".to_string(),
+                    Some(x) => format!(r"\[{}\]", x),
+                    None => r"\[\_\]".to_string(),
                 })
-                .collect::<Vec<_>>();
+                .collect::<String>();
 
-            // TODO: do not rely on debug representation of vectors
-            write!(f, "{:?}", as_str_vector)
+            write!(f, "{}", access)
         }
     }
 }

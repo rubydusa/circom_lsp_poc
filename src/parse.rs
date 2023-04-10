@@ -28,6 +28,10 @@ pub fn read_multiline_comment(content: &Rope, start: usize) -> Option<String> {
         match current_state {
             CommentParserState::Outside => match c {
                 '/' => current_state = CommentParserState::MaybeInside,
+                // TODO: more sophisticated way to decide when should stop looking for comment
+                // problem as of now is that circom doesn't hold exact information on what line is
+                // a definition declared
+                '}' | ';' => return None,
                 _ => (),
             },
             CommentParserState::MaybeInside => match c {
@@ -90,13 +94,19 @@ pub fn read_multi_singleline_comment(content: &Rope, start: usize) -> Option<Str
         current_line_idx -= 1;
 
         let line = content.line(current_line_idx);
-        // not converting to &str because it might fail (due to the structue of rope),
-        // and allocating for each line is wasteful
         let is_line_comment = {
-            if line.len_chars() < 2 {
-                false
-            } else {
-                line.char(0) == '/' && line.char(1) == '/'
+            let as_string = line.to_string();
+            let trimmed = as_string.trim();
+
+            let starts_as_comment = trimmed.len() >= 2 && &trimmed[0..2] == "//";
+            let suspicious = trimmed.ends_with("}") || trimmed.ends_with(";");
+
+            starts_as_comment || {
+                if suspicious {
+                    return None;
+                } else {
+                    false
+                }
             }
         };
 

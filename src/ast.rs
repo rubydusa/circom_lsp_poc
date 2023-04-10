@@ -105,7 +105,8 @@ impl TokenInfo {
 
     pub fn to_hover(&self) -> lsp_types::Hover {
         let range = Some(self.location.clone());
-        let contents = lsp_types::HoverContents::Scalar(lsp_types::MarkedString::String(format!("{}", &self)))
+        let contents =
+            lsp_types::HoverContents::Scalar(lsp_types::MarkedString::String(format!("{}", &self)));
 
         lsp_types::Hover { range, contents }
     }

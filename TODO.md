@@ -14,6 +14,7 @@
 - [ ] resolve bug where if function / template is not included in final archive it is not reachable by `find_token`
 - [ ] hover not showing in return statements
 - [ ] hover not showing in accesses
+- [x] definition gets docs of definition above it if it is single line comments
 
 ## Miscellaneous
 - [x] rename StatementOrExpression to something more appropriate

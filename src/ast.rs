@@ -371,7 +371,7 @@ fn iterate_contender<'a>(
                         );
                         None
                     }
-                    ast::Statement::Assert { meta, arg } => {
+                    ast::Statement::Assert { arg, .. } => {
                         contenders.push(Contender::StatementOrExpression(
                             StatementOrExpression::Expression(arg),
                         ));

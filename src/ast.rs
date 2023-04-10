@@ -76,8 +76,27 @@ impl TokenInfo {
         }
     }
 
+    pub fn try_new_defintion(
+        name: String,
+        archive: &ProgramArchive,
+        start: usize
+    ) -> Option<TokenInfo> {
+        find_definition_type(&name, archive)
+            .map(|token_type| {
+                let location = start..(start + name.len());
+                let docs = get_docs(&name, archive);
+
+                TokenInfo {
+                    name,
+                    token_type: TokenType::Defintion(token_type),
+                    location,
+                    docs
+                }
+            })
+    }
+
     pub fn description(&self) -> String {
-        format!("{}: {:?}", self.name, self.token_type)
+        format!("{}: {:?}, docs: {}", self.name, self.token_type, self.docs.clone().unwrap_or_else(|| "no docs".to_string()))
     }
 }
 
@@ -115,8 +134,10 @@ pub fn find_token(
         StatementOrExpression::Expression(&archive.inner.initial_template_call),
     ));
 
-    loop {
-        let statement_or_expression = statements_or_expressions.pop()?;
+    let result = loop {
+        let Some(statement_or_expression) = statements_or_expressions.pop() else {
+            break None
+        };
 
         match iterate_contender(start, word, statement_or_expression, archive) {
             Ok(token_info) => {
@@ -126,7 +147,9 @@ pub fn find_token(
                 statements_or_expressions.append(&mut add_to_stack);
             }
         }
-    }
+    };
+
+    result.or_else(|| TokenInfo::try_new_defintion(word.to_owned(), archive, start))
 }
 
 fn iterate_contender<'a>(

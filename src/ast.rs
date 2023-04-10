@@ -288,30 +288,7 @@ fn iterate_contender<'a>(
                     } => {
                         // order matters here
                         if var == word {
-                            let access =
-                                Access(
-                                    access
-                                        .into_iter()
-                                        .take_while(|x| match x {
-                                            ast::Access::ArrayAccess(_) => true,
-                                            _ => false,
-                                        })
-                                        .map(|x| match x {
-                                            ast::Access::ArrayAccess(e) => match e {
-                                                ast::Expression::Number(_, big_int) => {
-                                                    Some(AccessType::Num(big_int.to_u32().expect(
-                                                        "signal array length shouldnt be big",
-                                                    )))
-                                                }
-                                                ast::Expression::Variable { name, .. } => {
-                                                    Some(AccessType::Var(name.to_owned()))
-                                                }
-                                                _ => None,
-                                            },
-                                            _ => unreachable!(),
-                                        })
-                                        .collect(),
-                                );
+                            let access = generate_access(access);
                             let token_type = match op {
                                 ast::AssignOp::AssignVar => match rhe {
                                     ast::Expression::AnonymousComp { .. } => {
@@ -450,31 +427,7 @@ fn iterate_contender<'a>(
                         // TODO: get_reduces_to panics by default, make it so it can print custom error
                         // message depending on where reduction failed
                         let type_reduction = meta.get_type_knowledge().get_reduces_to();
-                        let access = Access(
-                            access
-                                .into_iter()
-                                .take_while(|x| match x {
-                                    ast::Access::ArrayAccess(_) => true,
-                                    _ => false,
-                                })
-                                .map(|x| match x {
-                                    ast::Access::ArrayAccess(e) => match e {
-                                        ast::Expression::Number(_, big_int) => {
-                                            Some(AccessType::Num(
-                                                big_int
-                                                    .to_u32()
-                                                    .expect("signal array length shouldnt be big"),
-                                            ))
-                                        }
-                                        ast::Expression::Variable { name, .. } => {
-                                            Some(AccessType::Var(name.to_owned()))
-                                        }
-                                        _ => None,
-                                    },
-                                    _ => unreachable!(),
-                                })
-                                .collect(),
-                        );
+                        let access = generate_access(access);
 
                         if word == name {
                             Some(match type_reduction {
@@ -655,6 +608,34 @@ fn definition_location<'a>(
             .expect("file_id of definition should be valid"),
         start,
     )
+}
+
+fn generate_access(access: &Vec<ast::Access>) -> Access {
+    let access = Access(
+        access
+        .into_iter()
+        .take_while(|x| match x {
+            ast::Access::ArrayAccess(_) => true,
+            _ => false,
+        })
+        .map(|x| match x {
+            ast::Access::ArrayAccess(e) => match e {
+                ast::Expression::Number(_, big_int) => {
+                    Some(AccessType::Num(
+                            big_int
+                            .to_u32()
+                            .expect("signal array length shouldnt be big"),
+                            ))
+                }
+                ast::Expression::Variable { name, .. } => {
+                    Some(AccessType::Var(name.to_owned()))
+                }
+                _ => None,
+            },
+            _ => unreachable!(),
+        })
+        .collect());
+    access
 }
 
 fn get_meta<'a>(statement_or_expression: StatementOrExpression<'a>) -> &'a ast::Meta {

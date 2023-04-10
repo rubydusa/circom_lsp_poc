@@ -9,12 +9,15 @@
 - [x] in case of template or function, generate docs
 - [x] prettier hover messages
 
+- [ ] reimplement go to defintion (find decleration instead if symbol not a definition)
+
 ## Bugs
 - [x] resolve bug where things are shown as variable despite being signal
 - [ ] resolve bug where if function / template is not included in final archive it is not reachable by `find_token`
 - [ ] hover not showing in return statements
 - [ ] hover not showing in accesses
 - [x] definition gets docs of definition above it if it is single line comments
+- [ ] access signature of symbol should be derived only from its declaration, not any expression/ statement that includes access information
 
 ## Miscellaneous
 - [x] rename StatementOrExpression to something more appropriate

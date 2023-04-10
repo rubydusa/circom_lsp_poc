@@ -192,55 +192,6 @@ fn iterate_contender<'a>(
 
             let token_type = match statement_or_expression {
                 StatementOrExpression::Statement(statement) => match statement {
-                    ast::Statement::IfThenElse {
-                        cond,
-                        if_case,
-                        else_case,
-                        ..
-                    } => {
-                        contenders.push(Contender::StatementOrExpression(
-                            StatementOrExpression::Expression(cond),
-                        ));
-                        contenders.push(Contender::StatementOrExpression(
-                            StatementOrExpression::Statement(&if_case),
-                        ));
-                        if let Some(else_case) = else_case {
-                            contenders.push(Contender::StatementOrExpression(
-                                StatementOrExpression::Statement(&else_case),
-                            ));
-                        }
-                        None
-                    }
-                    ast::Statement::While { cond, stmt, .. } => {
-                        contenders.push(Contender::StatementOrExpression(
-                            StatementOrExpression::Expression(cond),
-                        ));
-                        contenders.push(Contender::StatementOrExpression(
-                            StatementOrExpression::Statement(&stmt),
-                        ));
-                        None
-                    }
-                    ast::Statement::Return { value, .. } => {
-                        contenders.push(Contender::StatementOrExpression(
-                            StatementOrExpression::Expression(value),
-                        ));
-                        None
-                    }
-                    ast::Statement::InitializationBlock {
-                        initializations, ..
-                    } => {
-                        contenders.append(
-                            &mut initializations
-                                .into_iter()
-                                .map(|x| {
-                                    Contender::StatementOrExpression(
-                                        StatementOrExpression::Statement(x),
-                                    )
-                                })
-                                .collect(),
-                        );
-                        None
-                    }
                     ast::Statement::Declaration {
                         xtype,
                         name,
@@ -319,113 +270,12 @@ fn iterate_contender<'a>(
                                 document,
                             )));
                         }
-                        contenders.push(Contender::StatementOrExpression(
-                            StatementOrExpression::Expression(rhe),
-                        ));
                         None
-                    }
-                    ast::Statement::MultSubstitution { lhe, rhe, .. } => {
-                        contenders.push(Contender::StatementOrExpression(
-                            StatementOrExpression::Expression(lhe),
-                        ));
-                        contenders.push(Contender::StatementOrExpression(
-                            StatementOrExpression::Expression(rhe),
-                        ));
-                        None
-                    }
-                    ast::Statement::UnderscoreSubstitution { rhe, .. } => {
-                        contenders.push(Contender::StatementOrExpression(
-                            StatementOrExpression::Expression(rhe),
-                        ));
-                        None
-                    }
-                    ast::Statement::ConstraintEquality { lhe, rhe, .. } => {
-                        contenders.push(Contender::StatementOrExpression(
-                            StatementOrExpression::Expression(lhe),
-                        ));
-                        contenders.push(Contender::StatementOrExpression(
-                            StatementOrExpression::Expression(rhe),
-                        ));
-                        None
-                    }
-                    ast::Statement::LogCall { args, .. } => {
-                        let mut args_processed = args
-                            .into_iter()
-                            .filter_map(|x| match x {
-                                ast::LogArgument::LogExp(exp) => {
-                                    Some(Contender::StatementOrExpression(
-                                        StatementOrExpression::Expression(exp),
-                                    ))
-                                }
-                                _ => None,
-                            })
-                            .collect();
-
-                        contenders.append(&mut args_processed);
-                        None
-                    }
-                    ast::Statement::Block { stmts, .. } => {
-                        contenders.append(
-                            &mut stmts
-                                .into_iter()
-                                .map(|x| {
-                                    Contender::StatementOrExpression(
-                                        StatementOrExpression::Statement(x),
-                                    )
-                                })
-                                .collect(),
-                        );
-                        None
-                    }
-                    ast::Statement::Assert { arg, .. } => {
-                        contenders.push(Contender::StatementOrExpression(
-                            StatementOrExpression::Expression(arg),
-                        ));
-                        None
-                    }
+                    },
+                    _ => None
                 },
                 StatementOrExpression::Expression(expression) => match expression {
-                    ast::Expression::InfixOp { lhe, rhe, .. } => {
-                        contenders.push(Contender::StatementOrExpression(
-                            StatementOrExpression::Expression(lhe),
-                        ));
-                        contenders.push(Contender::StatementOrExpression(
-                            StatementOrExpression::Expression(rhe),
-                        ));
-                        None
-                    }
-                    ast::Expression::PrefixOp { rhe, .. } => {
-                        contenders.push(Contender::StatementOrExpression(
-                            StatementOrExpression::Expression(rhe),
-                        ));
-                        None
-                    }
-                    ast::Expression::InlineSwitchOp {
-                        cond,
-                        if_true,
-                        if_false,
-                        ..
-                    } => {
-                        contenders.push(Contender::StatementOrExpression(
-                            StatementOrExpression::Expression(cond),
-                        ));
-                        contenders.push(Contender::StatementOrExpression(
-                            StatementOrExpression::Expression(if_true),
-                        ));
-                        contenders.push(Contender::StatementOrExpression(
-                            StatementOrExpression::Expression(if_false),
-                        ));
-                        None
-                    }
-                    ast::Expression::ParallelOp { rhe, .. } => {
-                        contenders.push(Contender::StatementOrExpression(
-                            StatementOrExpression::Expression(rhe),
-                        ));
-                        None
-                    }
                     ast::Expression::Variable { name, access, .. } => {
-                        // TODO: get_reduces_to panics by default, make it so it can print custom error
-                        // message depending on where reduction failed
                         let type_reduction = meta.get_type_knowledge().get_reduces_to();
                         let access = generate_access(access);
 
@@ -440,7 +290,7 @@ fn iterate_contender<'a>(
                             None
                         }
                     }
-                    ast::Expression::Call { id, args, .. } => {
+                    ast::Expression::Call { id, .. } => {
                         // order matters here
                         if id == word {
                             contenders.push(Contender::Contender(TokenInfo::new(
@@ -454,23 +304,10 @@ fn iterate_contender<'a>(
                                 document,
                             )));
                         }
-
-                        let mut args_processed = args
-                            .into_iter()
-                            .map(|x| {
-                                Contender::StatementOrExpression(StatementOrExpression::Expression(
-                                    x,
-                                ))
-                            })
-                            .collect();
-
-                        contenders.append(&mut args_processed);
                         None
                     }
                     ast::Expression::AnonymousComp {
                         id,
-                        params,
-                        signals,
                         ..
                     } => {
                         // order matters here
@@ -486,68 +323,13 @@ fn iterate_contender<'a>(
                                 document,
                             )));
                         }
-
-                        let mut params_processed = params
-                            .into_iter()
-                            .map(|x| {
-                                Contender::StatementOrExpression(StatementOrExpression::Expression(
-                                    x,
-                                ))
-                            })
-                            .collect();
-                        let mut signals_processed = signals
-                            .into_iter()
-                            .map(|x| {
-                                Contender::StatementOrExpression(StatementOrExpression::Expression(
-                                    x,
-                                ))
-                            })
-                            .collect();
-
-                        contenders.append(&mut params_processed);
-                        contenders.append(&mut signals_processed);
-                        None
-                    }
-                    ast::Expression::ArrayInLine { values, .. } => {
-                        let mut values_processed = values
-                            .into_iter()
-                            .map(|x| {
-                                Contender::StatementOrExpression(StatementOrExpression::Expression(
-                                    x,
-                                ))
-                            })
-                            .collect();
-
-                        contenders.append(&mut values_processed);
-                        None
-                    }
-                    ast::Expression::Tuple { values, .. } => {
-                        let mut values_processed = values
-                            .into_iter()
-                            .map(|x| {
-                                Contender::StatementOrExpression(StatementOrExpression::Expression(
-                                    x,
-                                ))
-                            })
-                            .collect();
-
-                        contenders.append(&mut values_processed);
-                        None
-                    }
-                    ast::Expression::UniformArray {
-                        value, dimension, ..
-                    } => {
-                        contenders.push(Contender::StatementOrExpression(
-                            StatementOrExpression::Expression(dimension),
-                        ));
-                        contenders.push(Contender::StatementOrExpression(
-                            StatementOrExpression::Expression(value),
-                        ));
                         None
                     }
                     _ => None,
                 },
             };
+
+            contenders.append(&mut get_next_contenders(statement_or_expression));
 
             if let Some(token_type) = token_type {
                 Ok(TokenInfo::new(
@@ -613,29 +395,260 @@ fn definition_location<'a>(
 fn generate_access(access: &Vec<ast::Access>) -> Access {
     let access = Access(
         access
-        .into_iter()
-        .take_while(|x| match x {
-            ast::Access::ArrayAccess(_) => true,
-            _ => false,
-        })
-        .map(|x| match x {
-            ast::Access::ArrayAccess(e) => match e {
-                ast::Expression::Number(_, big_int) => {
-                    Some(AccessType::Num(
-                            big_int
+            .into_iter()
+            .take_while(|x| match x {
+                ast::Access::ArrayAccess(_) => true,
+                _ => false,
+            })
+            .map(|x| match x {
+                ast::Access::ArrayAccess(e) => match e {
+                    ast::Expression::Number(_, big_int) => Some(AccessType::Num(
+                        big_int
                             .to_u32()
                             .expect("signal array length shouldnt be big"),
-                            ))
-                }
-                ast::Expression::Variable { name, .. } => {
-                    Some(AccessType::Var(name.to_owned()))
-                }
-                _ => None,
-            },
-            _ => unreachable!(),
-        })
-        .collect());
+                    )),
+                    ast::Expression::Variable { name, .. } => {
+                        Some(AccessType::Var(name.to_owned()))
+                    }
+                    _ => None,
+                },
+                _ => unreachable!(),
+            })
+            .collect(),
+    );
     access
+}
+
+fn get_next_contenders(statement_or_expression: StatementOrExpression) -> Vec<Contender> {
+    let mut contenders = Vec::new();
+
+    match statement_or_expression {
+        StatementOrExpression::Statement(statement) => match statement {
+            ast::Statement::IfThenElse {
+                cond,
+                if_case,
+                else_case,
+                ..
+            } => {
+                contenders.push(Contender::StatementOrExpression(
+                    StatementOrExpression::Expression(cond),
+                ));
+                contenders.push(Contender::StatementOrExpression(
+                    StatementOrExpression::Statement(&if_case),
+                ));
+                if let Some(else_case) = else_case {
+                    contenders.push(Contender::StatementOrExpression(
+                        StatementOrExpression::Statement(&else_case),
+                    ));
+                }
+            }
+            ast::Statement::While { cond, stmt, .. } => {
+                contenders.push(Contender::StatementOrExpression(
+                    StatementOrExpression::Expression(cond),
+                ));
+                contenders.push(Contender::StatementOrExpression(
+                    StatementOrExpression::Statement(&stmt),
+                ));
+            }
+            ast::Statement::Return { value, .. } => {
+                contenders.push(Contender::StatementOrExpression(
+                    StatementOrExpression::Expression(value),
+                ));
+            }
+            ast::Statement::InitializationBlock {
+                initializations, ..
+            } => {
+                contenders.append(
+                    &mut initializations
+                        .into_iter()
+                        .map(|x| {
+                            Contender::StatementOrExpression(StatementOrExpression::Statement(x))
+                        })
+                        .collect(),
+                );
+            }
+            ast::Statement::Declaration {
+                dimensions, ..
+            } => {
+                contenders.append(
+                    &mut dimensions
+                        .into_iter()
+                        .map(|x| {
+                            Contender::StatementOrExpression(StatementOrExpression::Expression(x))
+                        })
+                        .collect(),
+                );
+            }
+            ast::Statement::Substitution { rhe, access, .. } => {
+                contenders.append(
+                    &mut access
+                        .into_iter()
+                        .filter_map(|x| match x {
+                            ast::Access::ArrayAccess(e) => Some(Contender::StatementOrExpression(
+                                StatementOrExpression::Expression(e),
+                            )),
+                            _ => None,
+                        })
+                        .collect(),
+                );
+                contenders.push(Contender::StatementOrExpression(
+                    StatementOrExpression::Expression(rhe),
+                ));
+            }
+            ast::Statement::MultSubstitution { lhe, rhe, .. } => {
+                contenders.push(Contender::StatementOrExpression(
+                    StatementOrExpression::Expression(lhe),
+                ));
+                contenders.push(Contender::StatementOrExpression(
+                    StatementOrExpression::Expression(rhe),
+                ));
+            }
+            ast::Statement::UnderscoreSubstitution { rhe, .. } => {
+                contenders.push(Contender::StatementOrExpression(
+                    StatementOrExpression::Expression(rhe),
+                ));
+            }
+            ast::Statement::ConstraintEquality { lhe, rhe, .. } => {
+                contenders.push(Contender::StatementOrExpression(
+                    StatementOrExpression::Expression(lhe),
+                ));
+                contenders.push(Contender::StatementOrExpression(
+                    StatementOrExpression::Expression(rhe),
+                ));
+            }
+            ast::Statement::LogCall { args, .. } => {
+                let mut args_processed = args
+                    .into_iter()
+                    .filter_map(|x| match x {
+                        ast::LogArgument::LogExp(exp) => Some(Contender::StatementOrExpression(
+                            StatementOrExpression::Expression(exp),
+                        )),
+                        _ => None,
+                    })
+                    .collect();
+
+                contenders.append(&mut args_processed);
+            }
+            ast::Statement::Block { stmts, .. } => {
+                contenders.append(
+                    &mut stmts
+                        .into_iter()
+                        .map(|x| {
+                            Contender::StatementOrExpression(StatementOrExpression::Statement(x))
+                        })
+                        .collect(),
+                );
+            }
+            ast::Statement::Assert { arg, .. } => {
+                contenders.push(Contender::StatementOrExpression(
+                    StatementOrExpression::Expression(arg),
+                ));
+            }
+        },
+        StatementOrExpression::Expression(expression) => match expression {
+            ast::Expression::InfixOp { lhe, rhe, .. } => {
+                contenders.push(Contender::StatementOrExpression(
+                    StatementOrExpression::Expression(lhe),
+                ));
+                contenders.push(Contender::StatementOrExpression(
+                    StatementOrExpression::Expression(rhe),
+                ));
+            }
+            ast::Expression::PrefixOp { rhe, .. } => {
+                contenders.push(Contender::StatementOrExpression(
+                    StatementOrExpression::Expression(rhe),
+                ));
+            }
+            ast::Expression::InlineSwitchOp {
+                cond,
+                if_true,
+                if_false,
+                ..
+            } => {
+                contenders.push(Contender::StatementOrExpression(
+                    StatementOrExpression::Expression(cond),
+                ));
+                contenders.push(Contender::StatementOrExpression(
+                    StatementOrExpression::Expression(if_true),
+                ));
+                contenders.push(Contender::StatementOrExpression(
+                    StatementOrExpression::Expression(if_false),
+                ));
+            }
+            ast::Expression::ParallelOp { rhe, .. } => {
+                contenders.push(Contender::StatementOrExpression(
+                    StatementOrExpression::Expression(rhe),
+                ));
+            }
+            ast::Expression::Variable { access, .. } => {
+                contenders.append(
+                    &mut access
+                        .into_iter()
+                        .filter_map(|x| match x {
+                            ast::Access::ArrayAccess(e) => Some(Contender::StatementOrExpression(
+                                StatementOrExpression::Expression(e),
+                            )),
+                            _ => None,
+                        })
+                        .collect(),
+                );
+            }
+            ast::Expression::Call { args, .. } => {
+                let mut args_processed = args
+                    .into_iter()
+                    .map(|x| Contender::StatementOrExpression(StatementOrExpression::Expression(x)))
+                    .collect();
+
+                contenders.append(&mut args_processed);
+            }
+            ast::Expression::AnonymousComp {
+                params,
+                signals,
+                ..
+            } => {
+                let mut params_processed = params
+                    .into_iter()
+                    .map(|x| Contender::StatementOrExpression(StatementOrExpression::Expression(x)))
+                    .collect();
+                let mut signals_processed = signals
+                    .into_iter()
+                    .map(|x| Contender::StatementOrExpression(StatementOrExpression::Expression(x)))
+                    .collect();
+
+                contenders.append(&mut params_processed);
+                contenders.append(&mut signals_processed);
+            }
+            ast::Expression::ArrayInLine { values, .. } => {
+                let mut values_processed = values
+                    .into_iter()
+                    .map(|x| Contender::StatementOrExpression(StatementOrExpression::Expression(x)))
+                    .collect();
+
+                contenders.append(&mut values_processed);
+            }
+            ast::Expression::Tuple { values, .. } => {
+                let mut values_processed = values
+                    .into_iter()
+                    .map(|x| Contender::StatementOrExpression(StatementOrExpression::Expression(x)))
+                    .collect();
+
+                contenders.append(&mut values_processed);
+            }
+            ast::Expression::UniformArray {
+                value, dimension, ..
+            } => {
+                contenders.push(Contender::StatementOrExpression(
+                    StatementOrExpression::Expression(dimension),
+                ));
+                contenders.push(Contender::StatementOrExpression(
+                    StatementOrExpression::Expression(value),
+                ));
+            }
+            _ => (),
+        },
+    };
+
+    contenders
 }
 
 fn get_meta<'a>(statement_or_expression: StatementOrExpression<'a>) -> &'a ast::Meta {

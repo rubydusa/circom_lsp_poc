@@ -10,6 +10,8 @@
 - [x] prettier hover messages
 
 - [ ] reimplement go to defintion (find decleration instead if symbol not a definition)
+- [ ] defintions should show params, templates show input and output signals
+- [ ] signals should show tag information
 
 ## Bugs
 - [x] resolve bug where things are shown as variable despite being signal
@@ -24,5 +26,4 @@
 
 ## Backburner
 - [ ] test tag support
-- [ ] defintions should show params, templates show input and output signals
 - [ ] neovim lsp client shows extra spaces when escaping characters in result (hypothesis: the server under the hood returns the suspected amount of characters the message should take and server doesn't account for escapes)

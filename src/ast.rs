@@ -134,42 +134,52 @@ pub fn find_token(
         .values()
         .filter_map(|x| {
             if x.get_file_id() == file_id {
-                Some(Contender::StatementOrExpression(
-                    StatementOrExpression::Statement(x.get_body()),
-                ))
+                Some(StatementOrExpression::Statement(x.get_body()))
             } else {
                 None
             }
         })
         .chain(archive.inner.templates.values().filter_map(|x| {
             if x.get_file_id() == file_id {
-                Some(Contender::StatementOrExpression(
-                    StatementOrExpression::Statement(x.get_body()),
-                ))
+                Some(StatementOrExpression::Statement(x.get_body()))
             } else {
                 None
             }
         }))
         .collect::<Vec<_>>();
 
-    statements_or_expressions.push(Contender::StatementOrExpression(
-        StatementOrExpression::Expression(&archive.inner.initial_template_call),
+    statements_or_expressions.push(StatementOrExpression::Expression(
+        &archive.inner.initial_template_call,
     ));
 
-    let result = loop {
-        let Some(statement_or_expression) = statements_or_expressions.pop() else {
-            break None
-        };
+    let mut result = None;
+    'main: for statement_or_expression in statements_or_expressions {
+        let context = statement_or_expression;
 
-        match iterate_contender(start, word, statement_or_expression, archive, &document) {
-            Ok(token_info) => {
-                break Some(token_info);
-            }
-            Err(mut add_to_stack) => {
-                statements_or_expressions.append(&mut add_to_stack);
+        let mut contenders = vec![Contender::StatementOrExpression(context)];
+        'inner: loop {
+            let Some(statement_or_expression) = contenders.pop() else {
+                break 'inner;
+            };
+
+            match iterate_contender(
+                start,
+                word,
+                statement_or_expression,
+                context,
+                archive,
+                &document,
+            ) {
+                Ok(token_info) => {
+                    result = Some(token_info);
+                    break 'main;
+                }
+                Err(mut add_to_stack) => {
+                    contenders.append(&mut add_to_stack);
+                }
             }
         }
-    };
+    }
 
     result.or_else(|| TokenInfo::try_new_defintion(word.to_owned(), archive, &document, start))
 }
@@ -178,6 +188,7 @@ fn iterate_contender<'a>(
     start: usize,
     word: &str,
     contender: Contender<'a>,
+    context: StatementOrExpression,
     archive: &ProgramArchive,
     document: &Rope,
 ) -> Result<TokenInfo, Vec<Contender<'a>>> {
@@ -192,40 +203,14 @@ fn iterate_contender<'a>(
 
             let token_type = match statement_or_expression {
                 StatementOrExpression::Statement(statement) => match statement {
-                    ast::Statement::Declaration {
-                        xtype,
-                        name,
-                        dimensions,
-                        ..
-                    } => {
+                    ast::Statement::Declaration { name, .. } => {
                         if name == word {
-                            let access = Access(
-                                dimensions
-                                    .into_iter()
-                                    .map(|x| match x {
-                                        ast::Expression::Number(_, big_int) => {
-                                            Some(AccessType::Num(
-                                                big_int
-                                                    .to_u32()
-                                                    .expect("signal array length shouldnt be big"),
-                                            ))
-                                        }
-                                        ast::Expression::Variable { name, .. } => {
-                                            Some(AccessType::Var(name.to_owned()))
-                                        }
-                                        _ => None,
-                                    })
-                                    .collect(),
-                            );
-
-                            Some(match xtype {
-                                ast::VariableType::Var => TokenType::Variable(access),
-                                ast::VariableType::Signal(..) => TokenType::Signal(access),
-                                ast::VariableType::Component
-                                | ast::VariableType::AnonymousComponent => {
-                                    TokenType::Component(access)
-                                }
-                            })
+                            // TODO: take into account declaration location
+                            Some(
+                                get_declaration(word, context)
+                                    .expect("declaration should exist")
+                                    .0,
+                            )
                         } else {
                             None
                         }
@@ -271,21 +256,19 @@ fn iterate_contender<'a>(
                             )));
                         }
                         None
-                    },
-                    _ => None
+                    }
+                    _ => None,
                 },
                 StatementOrExpression::Expression(expression) => match expression {
-                    ast::Expression::Variable { name, access, .. } => {
-                        let type_reduction = meta.get_type_knowledge().get_reduces_to();
-                        let access = generate_access(access);
-
+                    ast::Expression::Variable { name, .. } => {
+                        // TODO (maybe): exception for template and function params?
                         if word == name {
-                            Some(match type_reduction {
-                                ast::TypeReduction::Variable => TokenType::Variable(access),
-                                ast::TypeReduction::Component => TokenType::Component(access),
-                                ast::TypeReduction::Signal => TokenType::Signal(access),
-                                ast::TypeReduction::Tag => TokenType::Tag,
-                            })
+                            // TODO: add declaration location
+                            Some(
+                                get_declaration(word, context)
+                                    .expect("declaration should exist")
+                                    .0,
+                            )
                         } else {
                             None
                         }
@@ -306,10 +289,7 @@ fn iterate_contender<'a>(
                         }
                         None
                     }
-                    ast::Expression::AnonymousComp {
-                        id,
-                        ..
-                    } => {
+                    ast::Expression::AnonymousComp { id, .. } => {
                         // order matters here
                         if id == word {
                             contenders.push(Contender::Contender(TokenInfo::new(
@@ -329,7 +309,12 @@ fn iterate_contender<'a>(
                 },
             };
 
-            contenders.append(&mut get_next_contenders(statement_or_expression));
+            contenders.append(
+                &mut get_next_statements_or_expression(statement_or_expression)
+                    .into_iter()
+                    .map(Contender::StatementOrExpression)
+                    .collect(),
+            );
 
             if let Some(token_type) = token_type {
                 Ok(TokenInfo::new(
@@ -419,8 +404,75 @@ fn generate_access(access: &Vec<ast::Access>) -> Access {
     access
 }
 
-fn get_next_contenders(statement_or_expression: StatementOrExpression) -> Vec<Contender> {
-    let mut contenders = Vec::new();
+fn get_declaration(
+    symbol: &str,
+    context: StatementOrExpression,
+) -> Option<(TokenType, std::ops::Range<usize>)> {
+    let mut statements_or_expressions = vec![context];
+    loop {
+        let Some(statement_or_expression) = statements_or_expressions.pop() else {
+            break None
+        };
+
+        let result = match statement_or_expression {
+            StatementOrExpression::Statement(x) => match x {
+                ast::Statement::Declaration {
+                    meta,
+                    xtype,
+                    name,
+                    dimensions,
+                    ..
+                } => {
+                    if symbol != name {
+                        continue;
+                    }
+                    let access = Access(
+                        dimensions
+                            .into_iter()
+                            .map(|e| match e {
+                                ast::Expression::Number(_, big_int) => Some(AccessType::Num(
+                                    big_int
+                                        .to_u32()
+                                        .expect("signal array length shouldnt be big"),
+                                )),
+                                ast::Expression::Variable { name, .. } => {
+                                    Some(AccessType::Var(name.to_owned()))
+                                }
+                                _ => None,
+                            })
+                            .collect(),
+                    );
+
+                    let range = meta.start..meta.end;
+
+                    Some(match xtype {
+                        ast::VariableType::Var => (TokenType::Variable(access), range),
+                        ast::VariableType::Signal(..) => (TokenType::Signal(access), range),
+                        ast::VariableType::Component => (TokenType::Component(access), range),
+                        ast::VariableType::AnonymousComponent => {
+                            (TokenType::Component(access), range)
+                        }
+                    })
+                }
+                _ => None,
+            },
+            _ => None,
+        };
+
+        if result.is_some() {
+            break result;
+        } else {
+            statements_or_expressions.append(&mut get_next_statements_or_expression(
+                statement_or_expression,
+            ))
+        }
+    }
+}
+
+fn get_next_statements_or_expression(
+    statement_or_expression: StatementOrExpression,
+) -> Vec<StatementOrExpression> {
+    let mut statements_or_expressions = Vec::new();
 
     match statement_or_expression {
         StatementOrExpression::Statement(statement) => match statement {
@@ -430,134 +482,94 @@ fn get_next_contenders(statement_or_expression: StatementOrExpression) -> Vec<Co
                 else_case,
                 ..
             } => {
-                contenders.push(Contender::StatementOrExpression(
-                    StatementOrExpression::Expression(cond),
-                ));
-                contenders.push(Contender::StatementOrExpression(
-                    StatementOrExpression::Statement(&if_case),
-                ));
+                statements_or_expressions.push(StatementOrExpression::Expression(cond));
+                statements_or_expressions.push(StatementOrExpression::Statement(&if_case));
                 if let Some(else_case) = else_case {
-                    contenders.push(Contender::StatementOrExpression(
-                        StatementOrExpression::Statement(&else_case),
-                    ));
+                    statements_or_expressions.push(StatementOrExpression::Statement(&else_case));
                 }
             }
             ast::Statement::While { cond, stmt, .. } => {
-                contenders.push(Contender::StatementOrExpression(
-                    StatementOrExpression::Expression(cond),
-                ));
-                contenders.push(Contender::StatementOrExpression(
-                    StatementOrExpression::Statement(&stmt),
-                ));
+                statements_or_expressions.push(StatementOrExpression::Expression(cond));
+                statements_or_expressions.push(StatementOrExpression::Statement(&stmt));
             }
             ast::Statement::Return { value, .. } => {
-                contenders.push(Contender::StatementOrExpression(
-                    StatementOrExpression::Expression(value),
-                ));
+                statements_or_expressions.push(StatementOrExpression::Expression(value));
             }
             ast::Statement::InitializationBlock {
                 initializations, ..
             } => {
-                contenders.append(
+                statements_or_expressions.append(
                     &mut initializations
                         .into_iter()
-                        .map(|x| {
-                            Contender::StatementOrExpression(StatementOrExpression::Statement(x))
-                        })
+                        .map(|x| StatementOrExpression::Statement(x))
                         .collect(),
                 );
             }
-            ast::Statement::Declaration {
-                dimensions, ..
-            } => {
-                contenders.append(
+            ast::Statement::Declaration { dimensions, .. } => {
+                statements_or_expressions.append(
                     &mut dimensions
                         .into_iter()
-                        .map(|x| {
-                            Contender::StatementOrExpression(StatementOrExpression::Expression(x))
-                        })
+                        .map(|x| StatementOrExpression::Expression(x))
                         .collect(),
                 );
             }
             ast::Statement::Substitution { rhe, access, .. } => {
-                contenders.append(
+                statements_or_expressions.append(
                     &mut access
                         .into_iter()
                         .filter_map(|x| match x {
-                            ast::Access::ArrayAccess(e) => Some(Contender::StatementOrExpression(
-                                StatementOrExpression::Expression(e),
-                            )),
+                            ast::Access::ArrayAccess(e) => {
+                                Some(StatementOrExpression::Expression(e))
+                            }
                             _ => None,
                         })
                         .collect(),
                 );
-                contenders.push(Contender::StatementOrExpression(
-                    StatementOrExpression::Expression(rhe),
-                ));
+                statements_or_expressions.push(StatementOrExpression::Expression(rhe));
             }
             ast::Statement::MultSubstitution { lhe, rhe, .. } => {
-                contenders.push(Contender::StatementOrExpression(
-                    StatementOrExpression::Expression(lhe),
-                ));
-                contenders.push(Contender::StatementOrExpression(
-                    StatementOrExpression::Expression(rhe),
-                ));
+                statements_or_expressions.push(StatementOrExpression::Expression(lhe));
+                statements_or_expressions.push(StatementOrExpression::Expression(rhe));
             }
             ast::Statement::UnderscoreSubstitution { rhe, .. } => {
-                contenders.push(Contender::StatementOrExpression(
-                    StatementOrExpression::Expression(rhe),
-                ));
+                statements_or_expressions.push(StatementOrExpression::Expression(rhe));
             }
             ast::Statement::ConstraintEquality { lhe, rhe, .. } => {
-                contenders.push(Contender::StatementOrExpression(
-                    StatementOrExpression::Expression(lhe),
-                ));
-                contenders.push(Contender::StatementOrExpression(
-                    StatementOrExpression::Expression(rhe),
-                ));
+                statements_or_expressions.push(StatementOrExpression::Expression(lhe));
+                statements_or_expressions.push(StatementOrExpression::Expression(rhe));
             }
             ast::Statement::LogCall { args, .. } => {
                 let mut args_processed = args
                     .into_iter()
                     .filter_map(|x| match x {
-                        ast::LogArgument::LogExp(exp) => Some(Contender::StatementOrExpression(
-                            StatementOrExpression::Expression(exp),
-                        )),
+                        ast::LogArgument::LogExp(exp) => {
+                            Some(StatementOrExpression::Expression(exp))
+                        }
                         _ => None,
                     })
                     .collect();
 
-                contenders.append(&mut args_processed);
+                statements_or_expressions.append(&mut args_processed);
             }
             ast::Statement::Block { stmts, .. } => {
-                contenders.append(
+                statements_or_expressions.append(
                     &mut stmts
                         .into_iter()
-                        .map(|x| {
-                            Contender::StatementOrExpression(StatementOrExpression::Statement(x))
-                        })
+                        .map(|x| StatementOrExpression::Statement(x))
                         .collect(),
                 );
             }
             ast::Statement::Assert { arg, .. } => {
-                contenders.push(Contender::StatementOrExpression(
-                    StatementOrExpression::Expression(arg),
-                ));
+                statements_or_expressions.push(StatementOrExpression::Expression(arg));
             }
         },
         StatementOrExpression::Expression(expression) => match expression {
             ast::Expression::InfixOp { lhe, rhe, .. } => {
-                contenders.push(Contender::StatementOrExpression(
-                    StatementOrExpression::Expression(lhe),
-                ));
-                contenders.push(Contender::StatementOrExpression(
-                    StatementOrExpression::Expression(rhe),
-                ));
+                statements_or_expressions.push(StatementOrExpression::Expression(lhe));
+                statements_or_expressions.push(StatementOrExpression::Expression(rhe));
             }
             ast::Expression::PrefixOp { rhe, .. } => {
-                contenders.push(Contender::StatementOrExpression(
-                    StatementOrExpression::Expression(rhe),
-                ));
+                statements_or_expressions.push(StatementOrExpression::Expression(rhe));
             }
             ast::Expression::InlineSwitchOp {
                 cond,
@@ -565,29 +577,21 @@ fn get_next_contenders(statement_or_expression: StatementOrExpression) -> Vec<Co
                 if_false,
                 ..
             } => {
-                contenders.push(Contender::StatementOrExpression(
-                    StatementOrExpression::Expression(cond),
-                ));
-                contenders.push(Contender::StatementOrExpression(
-                    StatementOrExpression::Expression(if_true),
-                ));
-                contenders.push(Contender::StatementOrExpression(
-                    StatementOrExpression::Expression(if_false),
-                ));
+                statements_or_expressions.push(StatementOrExpression::Expression(cond));
+                statements_or_expressions.push(StatementOrExpression::Expression(if_true));
+                statements_or_expressions.push(StatementOrExpression::Expression(if_false));
             }
             ast::Expression::ParallelOp { rhe, .. } => {
-                contenders.push(Contender::StatementOrExpression(
-                    StatementOrExpression::Expression(rhe),
-                ));
+                statements_or_expressions.push(StatementOrExpression::Expression(rhe));
             }
             ast::Expression::Variable { access, .. } => {
-                contenders.append(
+                statements_or_expressions.append(
                     &mut access
                         .into_iter()
                         .filter_map(|x| match x {
-                            ast::Access::ArrayAccess(e) => Some(Contender::StatementOrExpression(
-                                StatementOrExpression::Expression(e),
-                            )),
+                            ast::Access::ArrayAccess(e) => {
+                                Some(StatementOrExpression::Expression(e))
+                            }
                             _ => None,
                         })
                         .collect(),
@@ -596,59 +600,53 @@ fn get_next_contenders(statement_or_expression: StatementOrExpression) -> Vec<Co
             ast::Expression::Call { args, .. } => {
                 let mut args_processed = args
                     .into_iter()
-                    .map(|x| Contender::StatementOrExpression(StatementOrExpression::Expression(x)))
+                    .map(|x| StatementOrExpression::Expression(x))
                     .collect();
 
-                contenders.append(&mut args_processed);
+                statements_or_expressions.append(&mut args_processed);
             }
             ast::Expression::AnonymousComp {
-                params,
-                signals,
-                ..
+                params, signals, ..
             } => {
                 let mut params_processed = params
                     .into_iter()
-                    .map(|x| Contender::StatementOrExpression(StatementOrExpression::Expression(x)))
+                    .map(|x| StatementOrExpression::Expression(x))
                     .collect();
                 let mut signals_processed = signals
                     .into_iter()
-                    .map(|x| Contender::StatementOrExpression(StatementOrExpression::Expression(x)))
+                    .map(|x| StatementOrExpression::Expression(x))
                     .collect();
 
-                contenders.append(&mut params_processed);
-                contenders.append(&mut signals_processed);
+                statements_or_expressions.append(&mut params_processed);
+                statements_or_expressions.append(&mut signals_processed);
             }
             ast::Expression::ArrayInLine { values, .. } => {
                 let mut values_processed = values
                     .into_iter()
-                    .map(|x| Contender::StatementOrExpression(StatementOrExpression::Expression(x)))
+                    .map(|x| StatementOrExpression::Expression(x))
                     .collect();
 
-                contenders.append(&mut values_processed);
+                statements_or_expressions.append(&mut values_processed);
             }
             ast::Expression::Tuple { values, .. } => {
                 let mut values_processed = values
                     .into_iter()
-                    .map(|x| Contender::StatementOrExpression(StatementOrExpression::Expression(x)))
+                    .map(|x| StatementOrExpression::Expression(x))
                     .collect();
 
-                contenders.append(&mut values_processed);
+                statements_or_expressions.append(&mut values_processed);
             }
             ast::Expression::UniformArray {
                 value, dimension, ..
             } => {
-                contenders.push(Contender::StatementOrExpression(
-                    StatementOrExpression::Expression(dimension),
-                ));
-                contenders.push(Contender::StatementOrExpression(
-                    StatementOrExpression::Expression(value),
-                ));
+                statements_or_expressions.push(StatementOrExpression::Expression(dimension));
+                statements_or_expressions.push(StatementOrExpression::Expression(value));
             }
             _ => (),
         },
     };
 
-    contenders
+    statements_or_expressions
 }
 
 fn get_meta<'a>(statement_or_expression: StatementOrExpression<'a>) -> &'a ast::Meta {

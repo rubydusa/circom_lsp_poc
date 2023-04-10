@@ -6,10 +6,8 @@
 - [x] take into account main component
 - [x] work also outside of blocks
 - [x] Add support for `access` (if a token is signal array, show it)
-- [ ] in case of template or function, generate docs
-- [ ] prettier hover messages
-
-- [ ] defintions should show params, templates show input and output signals
+- [x] in case of template or function, generate docs
+- [x] prettier hover messages
 
 ## Bugs
 - [x] resolve bug where things are shown as variable despite being signal
@@ -22,3 +20,4 @@
 
 ## Backburner
 - [ ] test tag support
+- [ ] defintions should show params, templates show input and output signals

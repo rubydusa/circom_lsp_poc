@@ -28,10 +28,20 @@ pub enum StatementOrExpression<'a> {
 #[derive(Debug)]
 pub enum TokenType {
     Variable(Access),
-    Signal(Access),
+    Signal(Access, SignalType, TagList),
     Component(Access),
     Defintion(DefinitionType),
 }
+
+#[derive(Debug)]
+pub enum SignalType {
+    Output,
+    Input,
+    Intermediate
+}
+
+#[derive(Debug)]
+pub struct TagList(Vec<String>);
 
 #[derive(Debug)]
 pub enum DefinitionType {
@@ -404,7 +414,18 @@ fn find_declaration(symbol: &str, scope: &Scope, archive: &ProgramArchive) -> Op
 
                     Some(match xtype {
                         ast::VariableType::Var => (TokenType::Variable(access), range),
-                        ast::VariableType::Signal(..) => (TokenType::Signal(access), range),
+                        ast::VariableType::Signal(signal_type, tag_list) => (
+                            TokenType::Signal(
+                                access,
+                                match signal_type {
+                                    ast::SignalType::Output => SignalType::Output,
+                                    ast::SignalType::Input => SignalType::Input,
+                                    ast::SignalType::Intermediate => SignalType::Intermediate
+                                },
+                                TagList(tag_list.clone())
+                            ), 
+                            range
+                        ),
                         ast::VariableType::Component => (TokenType::Component(access), range),
                         ast::VariableType::AnonymousComponent => {
                             (TokenType::Component(access), range)
@@ -667,7 +688,7 @@ impl fmt::Display for TokenType {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
             TokenType::Variable(access) => write!(f, "Variable{}", access),
-            TokenType::Signal(access) => write!(f, "Signal{}", access),
+            TokenType::Signal(access, signal_type, tag_list) => write!(f, "Signal{} {} {}", access, signal_type, tag_list),
             TokenType::Component(access) => write!(f, "Component{}", access),
             TokenType::Defintion(defintion_type) => write!(f, "{}", defintion_type),
         }
@@ -707,6 +728,26 @@ impl fmt::Display for AccessType {
         match self {
             AccessType::Num(x) => write!(f, "{}", x),
             AccessType::Var(x) => write!(f, "{}", x),
+        }
+    }
+}
+
+impl fmt::Display for SignalType {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            SignalType::Output => write!(f, "Output"),
+            SignalType::Input => write!(f, "Input"),
+            SignalType::Intermediate => write!(f, "Intermediate"),
+        }
+    }
+}
+
+impl fmt::Display for TagList {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        if self.0.is_empty() {
+            write!(f, "")
+        } else {
+            write!(f, "{{{}}}", self.0.join(","))
         }
     }
 }

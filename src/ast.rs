@@ -31,7 +31,6 @@ pub enum TokenType {
     Signal(Access),
     Component(Access),
     Defintion(DefinitionType),
-    Tag,
 }
 
 #[derive(Debug)]
@@ -365,33 +364,6 @@ fn definition_location<'a>(
     )
 }
 
-fn generate_access(access: &Vec<ast::Access>) -> Access {
-    let access = Access(
-        access
-            .into_iter()
-            .take_while(|x| match x {
-                ast::Access::ArrayAccess(_) => true,
-                _ => false,
-            })
-            .map(|x| match x {
-                ast::Access::ArrayAccess(e) => match e {
-                    ast::Expression::Number(_, big_int) => Some(AccessType::Num(
-                        big_int
-                            .to_u32()
-                            .expect("signal array length shouldnt be big"),
-                    )),
-                    ast::Expression::Variable { name, .. } => {
-                        Some(AccessType::Var(name.to_owned()))
-                    }
-                    _ => None,
-                },
-                _ => unreachable!(),
-            })
-            .collect(),
-    );
-    access
-}
-
 fn find_declaration(symbol: &str, scope: &Scope, archive: &ProgramArchive) -> Option<(TokenType, std::ops::Range<usize>)> {
     let mut statements_or_expressions = vec![scope.body];
     let result = loop {
@@ -698,7 +670,6 @@ impl fmt::Display for TokenType {
             TokenType::Signal(access) => write!(f, "Signal{}", access),
             TokenType::Component(access) => write!(f, "Component{}", access),
             TokenType::Defintion(defintion_type) => write!(f, "{}", defintion_type),
-            TokenType::Tag => write!(f, "Tag"),
         }
     }
 }

@@ -9,7 +9,7 @@
 - [x] in case of template or function, generate docs
 - [x] prettier hover messages
 
-- [ ] reimplement go to defintion (find decleration instead if symbol not a definition)
+- [x] reimplement go to defintion (find decleration instead if symbol not a definition)
 - [ ] defintions should show params, templates show input and output signals
 - [x] signals should show tag information and signal type
 - [ ] component types should show what component are they assigned to

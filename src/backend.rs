@@ -373,12 +373,6 @@ impl LanguageServer for Backend {
         };
 
         // TODO: A better way to relate between URI and file_id
-        /*
-        if let Some(token_info) = ast::find_token(pos, &word, archive.inner.file_id_main, archive) {
-            return Ok(Some(parse::simple_hover(token_info.description())));
-        }
-        */
-
         Ok(ast::find_token(pos, &word, archive.inner.file_id_main, archive).map(|x| x.to_hover()))
     }
 
@@ -396,26 +390,16 @@ impl LanguageServer for Backend {
             .get(&uri)
             .expect("document map should have uri on hover");
 
-        Ok(None)
-        /*
         // find what word is selected
         let Ok(Some((pos, word))) = parse::find_word(&document_data.content, params.text_document_position_params.position) else {
             return Ok(None);
         };
 
-        Ok(
-            Some(
-                GotoDefinitionResponse::Scalar(
-                    Location {
-                        uri: definition_uri,
-                        range: Range {
-                            start: parse::char_to_position(&rope, start).expect("word start should be valid"),
-                            end: parse::char_to_position(&rope, end).expect("word end should be valid")
-                        }
-                    }
-                )
-            )
-        )
-        */
+        let Some(archive) = &document_data.archive else {
+            return Ok(None)
+        };
+
+        // TODO: A better way to relate between URI and file_id
+        Ok(ast::find_token(pos, &word, archive.inner.file_id_main, archive).map(|x| x.to_goto_definition()))
     }
 }

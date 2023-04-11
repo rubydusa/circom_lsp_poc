@@ -96,8 +96,8 @@ impl<'a> Scope<'a> {
 pub struct TokenInfo {
     name: String,
     token_type: TokenType,
-    location: lsp_types::Range,
-    declaration_location: lsp_types::Range,
+    range: lsp_types::Range,
+    declaration_location: lsp_types::Location,
     docs: Option<String>,
 }
 
@@ -105,28 +105,25 @@ impl TokenInfo {
     pub fn new(
         name: String,
         scope: &Scope,
-        meta: &ast::Meta,
+        range: std::ops::Range<usize>,
         archive: &ProgramArchive,
-        document: &Rope,
+        file_id: usize
     ) -> TokenInfo {
-        let location = parse::char_range_to_position_range(document, meta.start..meta.end)
-            .expect("unmatching document");
+        let lsp_types::Location { range, ..} = get_location(range, file_id, archive).expect("unmatching document");
         let docs = get_docs(&name, archive);
-        let (token_type, declaration_location) = find_declaration(&name, scope, archive)
+        let (token_type, declaration_location) = find_declaration(&name, scope, archive, file_id)
             .expect(&format!("token should exist in scope: {}", name));
-        let declaration_location =
-            parse::char_range_to_position_range(document, declaration_location)
-                .expect("unmatching document");
 
         TokenInfo {
             name,
             token_type,
             declaration_location,
-            location,
+            range,
             docs,
         }
     }
 
+    /*
     pub fn try_new_defintion(
         name: String,
         archive: &ProgramArchive,
@@ -143,18 +140,23 @@ impl TokenInfo {
                 name,
                 token_type: TokenType::Defintion(token_type),
                 declaration_location: location,
-                location,
+                range: location,
                 docs,
             }
         })
     }
+    */
 
     pub fn to_hover(&self) -> lsp_types::Hover {
-        let range = Some(self.location.clone());
+        let range = Some(self.range.clone());
         let contents =
             lsp_types::HoverContents::Scalar(lsp_types::MarkedString::String(format!("{}", &self)));
 
         lsp_types::Hover { range, contents }
+    }
+
+    pub fn to_goto_definition(&self) -> lsp_types::GotoDefinitionResponse {
+        lsp_types::GotoDefinitionResponse::Scalar(self.declaration_location.clone())
     }
 }
 
@@ -164,16 +166,6 @@ pub fn find_token(
     file_id: usize,
     archive: &ProgramArchive,
 ) -> Option<TokenInfo> {
-    let document = Rope::from_str(
-        archive
-            .inner
-            .file_library
-            .to_storage()
-            .get(file_id)
-            .expect("invalid file_id in find_token")
-            .source(),
-    );
-
     let defintions = archive
         .inner
         .functions
@@ -194,12 +186,6 @@ pub fn find_token(
         }))
         .collect::<Vec<_>>();
 
-    /*
-    defintions.push(StatementOrExpression::Expression(
-        &archive.inner.initial_template_call,
-    ));
-    */
-
     let mut result = None;
     'main: for definition in defintions {
         let mut contenders = vec![Contender::StatementOrExpression(definition.body)];
@@ -214,7 +200,7 @@ pub fn find_token(
                 statement_or_expression,
                 &definition,
                 archive,
-                &document,
+                file_id,
             ) {
                 Ok(token_info) => {
                     result = Some(token_info);
@@ -227,7 +213,8 @@ pub fn find_token(
         }
     }
 
-    result.or_else(|| TokenInfo::try_new_defintion(word.to_owned(), archive, &document, start))
+    // result.or_else(|| TokenInfo::try_new_defintion(word.to_owned(), archive, &document, start))
+    result
 }
 
 fn iterate_contender<'a>(
@@ -236,7 +223,7 @@ fn iterate_contender<'a>(
     contender: Contender<'a>,
     scope: &Scope,
     archive: &ProgramArchive,
-    document: &Rope,
+    file_id: usize,
 ) -> Result<TokenInfo, Vec<Contender<'a>>> {
     match contender {
         Contender::Contender(token_info) => Ok(token_info),
@@ -256,9 +243,9 @@ fn iterate_contender<'a>(
                             contenders.push(Contender::Contender(TokenInfo::new(
                                 word.to_owned(),
                                 scope,
-                                meta,
+                                meta.start..meta.end,
                                 archive,
-                                document,
+                                file_id,
                             )));
                         }
                         false
@@ -276,9 +263,9 @@ fn iterate_contender<'a>(
                             contenders.push(Contender::Contender(TokenInfo::new(
                                 word.to_owned(),
                                 scope,
-                                meta,
+                                meta.start..meta.end,
                                 archive,
-                                document,
+                                file_id,
                             )));
                         }
                         false
@@ -289,9 +276,9 @@ fn iterate_contender<'a>(
                             contenders.push(Contender::Contender(TokenInfo::new(
                                 word.to_owned(),
                                 scope,
-                                meta,
+                                meta.start..meta.end,
                                 archive,
-                                document,
+                                file_id,
                             )));
                         }
                         false
@@ -311,9 +298,9 @@ fn iterate_contender<'a>(
                 Ok(TokenInfo::new(
                     word.to_owned(),
                     scope,
-                    meta,
+                    meta.start..meta.end,
                     archive,
-                    document,
+                    file_id,
                 ))
             } else {
                 Err(contenders)
@@ -333,6 +320,7 @@ fn get_docs(name: &str, archive: &ProgramArchive) -> Option<String> {
         .flatten()
 }
 
+// TODO: remove confusing function
 fn find_definition_type(name: &str, archive: &ProgramArchive) -> Option<DefinitionType> {
     find_definition(name, archive).map(|x| match x {
         DefinitionData::Template(_) => DefinitionType::Template,
@@ -350,6 +338,7 @@ fn find_definition<'a>(name: &str, archive: &'a ProgramArchive) -> Option<Defini
     }
 }
 
+// TODO: remove confusing function and inline where used
 fn definition_location<'a>(
     defintion_data: DefinitionData,
     file_library: &'a FileLibrary,
@@ -368,11 +357,29 @@ fn definition_location<'a>(
     )
 }
 
+fn get_location(
+    range: std::ops::Range<usize>,
+    file_id: usize,
+    archive: &ProgramArchive,
+) -> Option<lsp_types::Location> {
+    let simple_file = archive.inner.file_library.to_storage().get(file_id)?;
+
+    let uri = parse::string_to_uri(simple_file.name());
+    let source = simple_file.source();
+
+    let document = Rope::from_str(source);
+    Some(lsp_types::Location {
+        uri,
+        range: parse::char_range_to_position_range(&document, range).ok()?,
+    })
+}
+
 fn find_declaration(
     symbol: &str,
     scope: &Scope,
     archive: &ProgramArchive,
-) -> Option<(TokenType, std::ops::Range<usize>)> {
+    file_id: usize,
+) -> Option<(TokenType, lsp_types::Location)> {
     let mut statements_or_expressions = vec![scope.body];
     let result = loop {
         let Some(statement_or_expression) = statements_or_expressions.pop() else {
@@ -408,27 +415,24 @@ fn find_declaration(
                             .collect(),
                     );
 
-                    let range = meta.start..meta.end;
-
-                    Some(match xtype {
-                        ast::VariableType::Var => (TokenType::Variable(access), range),
-                        ast::VariableType::Signal(signal_type, tag_list) => (
-                            TokenType::Signal(
-                                access,
-                                match signal_type {
-                                    ast::SignalType::Output => SignalType::Output,
-                                    ast::SignalType::Input => SignalType::Input,
-                                    ast::SignalType::Intermediate => SignalType::Intermediate,
-                                },
-                                TagList(tag_list.clone()),
-                            ),
-                            range,
+                    let location = get_location(meta.start..meta.end, file_id, archive)
+                        .expect("find_declaration location should be valid");
+                    let token_type = match xtype {
+                        ast::VariableType::Var => TokenType::Variable(access),
+                        ast::VariableType::Signal(signal_type, tag_list) => TokenType::Signal(
+                            access,
+                            match signal_type {
+                                ast::SignalType::Output => SignalType::Output,
+                                ast::SignalType::Input => SignalType::Input,
+                                ast::SignalType::Intermediate => SignalType::Intermediate,
+                            },
+                            TagList(tag_list.clone()),
                         ),
-                        ast::VariableType::Component => (TokenType::Component(access), range),
-                        ast::VariableType::AnonymousComponent => {
-                            (TokenType::Component(access), range)
-                        }
-                    })
+                        ast::VariableType::Component => TokenType::Component(access),
+                        ast::VariableType::AnonymousComponent => TokenType::Component(access),
+                    };
+
+                    Some((token_type, location))
                 }
                 _ => None,
             },
@@ -449,15 +453,39 @@ fn find_declaration(
             if scope.params.contains(&symbol.to_string()) {
                 Some((
                     TokenType::Variable(Access(vec![])),
-                    scope.params_location.clone(),
+                    get_location(scope.params_location.clone(), file_id, archive)
+                        .expect("find_declaration location should be valid"),
                 ))
             } else {
                 None
             }
         })
         .or_else(|| {
+            /*
             find_definition_type(symbol, archive)
                 .map(|x| (TokenType::Defintion(x), scope.params_location.clone()))
+            */
+
+            let definition_data = find_definition(symbol, archive)?;
+            let (token_type, file_id, start) = match definition_data {
+                DefinitionData::Template(x) => (
+                    TokenType::Defintion(DefinitionType::Template),
+                    x.get_file_id(),
+                    x.get_param_location().start,
+                ),
+                DefinitionData::Function(x) => (
+                    TokenType::Defintion(DefinitionType::Function),
+                    x.get_file_id(),
+                    x.get_param_location().start,
+                ),
+            };
+
+            // range is param location there fore length is not easily estimatable
+            Some((
+                token_type,
+                get_location(start..start, file_id, archive)
+                    .expect("find_declaration location should be valid"),
+            ))
         })
 }
 

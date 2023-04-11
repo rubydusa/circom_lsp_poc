@@ -310,22 +310,20 @@ fn iterate_contender<'a>(
 }
 
 fn get_docs(name: &str, archive: &ProgramArchive) -> Option<String> {
-    find_definition(name, archive)
-        .map(|x| {
-            let (file, start) = definition_location(x, &archive.inner.file_library);
-            let content = Rope::from_str(file.source());
+    let definition = find_definition(name, archive)?;
+    let (file_id, start) = match definition {
+        DefinitionData::Template(data) => (data.get_file_id(), data.get_param_location().start),
+        DefinitionData::Function(data) => (data.get_file_id(), data.get_param_location().start),
+    };
+    let file = archive
+        .inner
+        .file_library
+        .to_storage()
+        .get(file_id)
+        .expect("file_id of definition should be valid");
+    let content = Rope::from_str(file.source());
 
-            parse::read_comment(&content, start)
-        })
-        .flatten()
-}
-
-// TODO: remove confusing function
-fn find_definition_type(name: &str, archive: &ProgramArchive) -> Option<DefinitionType> {
-    find_definition(name, archive).map(|x| match x {
-        DefinitionData::Template(_) => DefinitionType::Template,
-        DefinitionData::Function(_) => DefinitionType::Function,
-    })
+    parse::read_comment(&content, start)
 }
 
 fn find_definition<'a>(name: &str, archive: &'a ProgramArchive) -> Option<DefinitionData<'a>> {
@@ -336,25 +334,6 @@ fn find_definition<'a>(name: &str, archive: &'a ProgramArchive) -> Option<Defini
     } else {
         None
     }
-}
-
-// TODO: remove confusing function and inline where used
-fn definition_location<'a>(
-    defintion_data: DefinitionData,
-    file_library: &'a FileLibrary,
-) -> (&'a SimpleFile<String, String>, usize) {
-    let (file_id, start) = match defintion_data {
-        DefinitionData::Template(data) => (data.get_file_id(), data.get_param_location().start),
-        DefinitionData::Function(data) => (data.get_file_id(), data.get_param_location().start),
-    };
-
-    (
-        file_library
-            .to_storage()
-            .get(file_id)
-            .expect("file_id of definition should be valid"),
-        start,
-    )
 }
 
 fn get_location(

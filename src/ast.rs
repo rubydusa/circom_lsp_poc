@@ -37,7 +37,7 @@ pub enum TokenType {
 pub enum SignalType {
     Output,
     Input,
-    Intermediate
+    Intermediate,
 }
 
 #[derive(Debug)]
@@ -112,8 +112,8 @@ impl TokenInfo {
         let location = parse::char_range_to_position_range(document, meta.start..meta.end)
             .expect("unmatching document");
         let docs = get_docs(&name, archive);
-        let (token_type, declaration_location) =
-            find_declaration(&name, scope, archive).expect(&format!("token should exist in scope: {}", name));
+        let (token_type, declaration_location) = find_declaration(&name, scope, archive)
+            .expect(&format!("token should exist in scope: {}", name));
         let declaration_location =
             parse::char_range_to_position_range(document, declaration_location)
                 .expect("unmatching document");
@@ -185,19 +185,13 @@ pub fn find_token(
                 None
             }
         })
-        .chain(
-            archive
-                .inner
-                .templates
-                .values()
-                .filter_map(|x| {
-                    if x.get_file_id() == file_id {
-                        Some(Scope::new(DefinitionData::Template(x)))
-                    } else {
-                        None
-                    }
-                }),
-        )
+        .chain(archive.inner.templates.values().filter_map(|x| {
+            if x.get_file_id() == file_id {
+                Some(Scope::new(DefinitionData::Template(x)))
+            } else {
+                None
+            }
+        }))
         .collect::<Vec<_>>();
 
     /*
@@ -374,7 +368,11 @@ fn definition_location<'a>(
     )
 }
 
-fn find_declaration(symbol: &str, scope: &Scope, archive: &ProgramArchive) -> Option<(TokenType, std::ops::Range<usize>)> {
+fn find_declaration(
+    symbol: &str,
+    scope: &Scope,
+    archive: &ProgramArchive,
+) -> Option<(TokenType, std::ops::Range<usize>)> {
     let mut statements_or_expressions = vec![scope.body];
     let result = loop {
         let Some(statement_or_expression) = statements_or_expressions.pop() else {
@@ -420,11 +418,11 @@ fn find_declaration(symbol: &str, scope: &Scope, archive: &ProgramArchive) -> Op
                                 match signal_type {
                                     ast::SignalType::Output => SignalType::Output,
                                     ast::SignalType::Input => SignalType::Input,
-                                    ast::SignalType::Intermediate => SignalType::Intermediate
+                                    ast::SignalType::Intermediate => SignalType::Intermediate,
                                 },
-                                TagList(tag_list.clone())
-                            ), 
-                            range
+                                TagList(tag_list.clone()),
+                            ),
+                            range,
                         ),
                         ast::VariableType::Component => (TokenType::Component(access), range),
                         ast::VariableType::AnonymousComponent => {
@@ -446,20 +444,21 @@ fn find_declaration(symbol: &str, scope: &Scope, archive: &ProgramArchive) -> Op
         }
     };
 
-    result.or_else(|| {
-        if scope.params.contains(&symbol.to_string()) {
-            Some((
-                TokenType::Variable(Access(vec![])),
-                scope.params_location.clone(),
-            ))
-        } else {
-            None
-        }
-    }).or_else(|| {
-        find_definition_type(symbol, archive).map(|x| {
-            (TokenType::Defintion(x), scope.params_location.clone())
+    result
+        .or_else(|| {
+            if scope.params.contains(&symbol.to_string()) {
+                Some((
+                    TokenType::Variable(Access(vec![])),
+                    scope.params_location.clone(),
+                ))
+            } else {
+                None
+            }
         })
-    })
+        .or_else(|| {
+            find_definition_type(symbol, archive)
+                .map(|x| (TokenType::Defintion(x), scope.params_location.clone()))
+        })
 }
 
 fn get_next_statements_or_expression(
@@ -688,7 +687,9 @@ impl fmt::Display for TokenType {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
             TokenType::Variable(access) => write!(f, "Variable{}", access),
-            TokenType::Signal(access, signal_type, tag_list) => write!(f, "Signal{} {} {}", access, signal_type, tag_list),
+            TokenType::Signal(access, signal_type, tag_list) => {
+                write!(f, "Signal{} {} {}", access, signal_type, tag_list)
+            }
             TokenType::Component(access) => write!(f, "Component{}", access),
             TokenType::Defintion(defintion_type) => write!(f, "{}", defintion_type),
         }

@@ -55,6 +55,35 @@ pub enum DefinitionData<'a> {
     Function(&'a FunctionData),
 }
 
+pub struct Scope<'a> {
+    body: StatementOrExpression<'a>,
+    params: &'a Vec<String>,
+    params_location: std::ops::Range<usize>,
+}
+
+impl<'a> Scope<'a> {
+    fn new(defintion_data: DefinitionData<'a>) -> Scope<'a> {
+        let (body, params, params_location) = match defintion_data {
+            DefinitionData::Template(x) => (
+                StatementOrExpression::Statement(x.get_body()),
+                x.get_name_of_params(),
+                x.get_param_location(),
+            ),
+            DefinitionData::Function(x) => (
+                StatementOrExpression::Statement(x.get_body()),
+                x.get_name_of_params(),
+                x.get_param_location(),
+            ),
+        };
+
+        Scope {
+            body,
+            params,
+            params_location,
+        }
+    }
+}
+
 pub struct TokenInfo {
     name: String,
     token_type: TokenType,
@@ -66,7 +95,7 @@ pub struct TokenInfo {
 impl TokenInfo {
     pub fn new(
         name: String,
-        context: StatementOrExpression,
+        scope: &Scope,
         meta: &ast::Meta,
         archive: &ProgramArchive,
         document: &Rope,
@@ -74,8 +103,11 @@ impl TokenInfo {
         let location = parse::char_range_to_position_range(document, meta.start..meta.end)
             .expect("unmatching document");
         let docs = get_docs(&name, archive);
-        let (token_type, declaration_location) = find_declaration(&name, context).expect("token should exist within context");
-        let declaration_location = parse::char_range_to_position_range(document, declaration_location).expect("unmatching document");
+        let (token_type, declaration_location) =
+            find_declaration(&name, scope, archive).expect(&format!("token should exist in scope: {}", name));
+        let declaration_location =
+            parse::char_range_to_position_range(document, declaration_location)
+                .expect("unmatching document");
 
         TokenInfo {
             name,
@@ -133,35 +165,41 @@ pub fn find_token(
             .source(),
     );
 
-    let mut statements_or_expressions = archive
+    let defintions = archive
         .inner
         .functions
         .values()
         .filter_map(|x| {
             if x.get_file_id() == file_id {
-                Some(StatementOrExpression::Statement(x.get_body()))
+                Some(Scope::new(DefinitionData::Function(x)))
             } else {
                 None
             }
         })
-        .chain(archive.inner.templates.values().filter_map(|x| {
-            if x.get_file_id() == file_id {
-                Some(StatementOrExpression::Statement(x.get_body()))
-            } else {
-                None
-            }
-        }))
+        .chain(
+            archive
+                .inner
+                .templates
+                .values()
+                .filter_map(|x| {
+                    if x.get_file_id() == file_id {
+                        Some(Scope::new(DefinitionData::Template(x)))
+                    } else {
+                        None
+                    }
+                }),
+        )
         .collect::<Vec<_>>();
 
-    statements_or_expressions.push(StatementOrExpression::Expression(
+    /*
+    defintions.push(StatementOrExpression::Expression(
         &archive.inner.initial_template_call,
     ));
+    */
 
     let mut result = None;
-    'main: for statement_or_expression in statements_or_expressions {
-        let context = statement_or_expression;
-
-        let mut contenders = vec![Contender::StatementOrExpression(context)];
+    'main: for definition in defintions {
+        let mut contenders = vec![Contender::StatementOrExpression(definition.body)];
         'inner: loop {
             let Some(statement_or_expression) = contenders.pop() else {
                 break 'inner;
@@ -171,7 +209,7 @@ pub fn find_token(
                 start,
                 word,
                 statement_or_expression,
-                context,
+                &definition,
                 archive,
                 &document,
             ) {
@@ -193,7 +231,7 @@ fn iterate_contender<'a>(
     start: usize,
     word: &str,
     contender: Contender<'a>,
-    context: StatementOrExpression,
+    scope: &Scope,
     archive: &ProgramArchive,
     document: &Rope,
 ) -> Result<TokenInfo, Vec<Contender<'a>>> {
@@ -208,18 +246,13 @@ fn iterate_contender<'a>(
 
             let is_match = match statement_or_expression {
                 StatementOrExpression::Statement(statement) => match statement {
-                    ast::Statement::Declaration { name, .. } => {
-                        name == word
-                    }
-                    ast::Statement::Substitution {
-                        var,
-                        ..
-                    } => {
+                    ast::Statement::Declaration { name, .. } => name == word,
+                    ast::Statement::Substitution { var, .. } => {
                         // order matters here
                         if var == word {
                             contenders.push(Contender::Contender(TokenInfo::new(
                                 word.to_owned(),
-                                context,
+                                scope,
                                 meta,
                                 archive,
                                 document,
@@ -239,7 +272,7 @@ fn iterate_contender<'a>(
                         if id == word {
                             contenders.push(Contender::Contender(TokenInfo::new(
                                 word.to_owned(),
-                                context,
+                                scope,
                                 meta,
                                 archive,
                                 document,
@@ -252,7 +285,7 @@ fn iterate_contender<'a>(
                         if id == word {
                             contenders.push(Contender::Contender(TokenInfo::new(
                                 word.to_owned(),
-                                context,
+                                scope,
                                 meta,
                                 archive,
                                 document,
@@ -274,7 +307,7 @@ fn iterate_contender<'a>(
             if is_match {
                 Ok(TokenInfo::new(
                     word.to_owned(),
-                    context,
+                    scope,
                     meta,
                     archive,
                     document,
@@ -359,12 +392,9 @@ fn generate_access(access: &Vec<ast::Access>) -> Access {
     access
 }
 
-fn find_declaration(
-    symbol: &str,
-    context: StatementOrExpression,
-) -> Option<(TokenType, std::ops::Range<usize>)> {
-    let mut statements_or_expressions = vec![context];
-    loop {
+fn find_declaration(symbol: &str, scope: &Scope, archive: &ProgramArchive) -> Option<(TokenType, std::ops::Range<usize>)> {
+    let mut statements_or_expressions = vec![scope.body];
+    let result = loop {
         let Some(statement_or_expression) = statements_or_expressions.pop() else {
             break None
         };
@@ -421,7 +451,22 @@ fn find_declaration(
                 statement_or_expression,
             ))
         }
-    }
+    };
+
+    result.or_else(|| {
+        if scope.params.contains(&symbol.to_string()) {
+            Some((
+                TokenType::Variable(Access(vec![])),
+                scope.params_location.clone(),
+            ))
+        } else {
+            None
+        }
+    }).or_else(|| {
+        find_definition_type(symbol, archive).map(|x| {
+            (TokenType::Defintion(x), scope.params_location.clone())
+        })
+    })
 }
 
 fn get_next_statements_or_expression(

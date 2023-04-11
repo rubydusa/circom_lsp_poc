@@ -74,7 +74,7 @@ impl TokenInfo {
         let location = parse::char_range_to_position_range(document, meta.start..meta.end)
             .expect("unmatching document");
         let docs = get_docs(&name, archive);
-        let (token_type, declaration_location) = get_declaration(&name, context).expect("token should exist within context");
+        let (token_type, declaration_location) = find_declaration(&name, context).expect("token should exist within context");
         let declaration_location = parse::char_range_to_position_range(document, declaration_location).expect("unmatching document");
 
         TokenInfo {
@@ -359,7 +359,7 @@ fn generate_access(access: &Vec<ast::Access>) -> Access {
     access
 }
 
-fn get_declaration(
+fn find_declaration(
     symbol: &str,
     context: StatementOrExpression,
 ) -> Option<(TokenType, std::ops::Range<usize>)> {

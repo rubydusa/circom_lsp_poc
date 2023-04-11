@@ -2,10 +2,8 @@ use ropey::Rope;
 use tower_lsp::lsp_types;
 
 use circom_structure::abstract_syntax_tree::ast;
-use circom_structure::file_definition::FileLibrary;
 use circom_structure::function_data::FunctionData;
 use circom_structure::template_data::TemplateData;
-use codespan_reporting::files::SimpleFile;
 
 use num_traits::cast::ToPrimitive;
 
@@ -107,12 +105,14 @@ impl TokenInfo {
         scope: &Scope,
         range: std::ops::Range<usize>,
         archive: &ProgramArchive,
-        file_id: usize
+        file_id: usize,
     ) -> TokenInfo {
-        let lsp_types::Location { range, ..} = get_location(range, file_id, archive).expect("unmatching document");
+        let lsp_types::Location { range, .. } =
+            get_location(range, file_id, archive).expect("unmatching document");
         let docs = get_docs(&name, archive);
-        let (token_type, declaration_location) = find_declaration(&name, scope, archive, file_id)
-            .expect(&format!("token should exist in scope: {}", name));
+        let (token_type, declaration_location) =
+            find_declaration(&name, Some(scope), archive, file_id)
+                .expect(&format!("token should exist in scope: {}", name));
 
         TokenInfo {
             name,
@@ -123,29 +123,26 @@ impl TokenInfo {
         }
     }
 
-    /*
-    pub fn try_new_defintion(
+    pub fn try_new_definition(
         name: String,
-        archive: &ProgramArchive,
-        document: &Rope,
         start: usize,
+        archive: &ProgramArchive,
+        file_id: usize,
     ) -> Option<TokenInfo> {
-        find_definition_type(&name, archive).map(|token_type| {
-            let location =
-                parse::char_range_to_position_range(document, start..(start + name.len()))
-                    .expect("unmatching document");
-            let docs = get_docs(&name, archive);
+        let lsp_types::Location { range, .. } =
+            get_location(start..(start + name.len()), file_id, archive)
+                .expect("unmatching document");
+        let docs = get_docs(&name, archive);
+        let (token_type, declaration_location) = find_declaration(&name, None, archive, file_id)?;
 
-            TokenInfo {
-                name,
-                token_type: TokenType::Defintion(token_type),
-                declaration_location: location,
-                range: location,
-                docs,
-            }
+        Some(TokenInfo {
+            name,
+            token_type,
+            declaration_location,
+            range,
+            docs,
         })
     }
-    */
 
     pub fn to_hover(&self) -> lsp_types::Hover {
         let range = Some(self.range.clone());
@@ -213,8 +210,7 @@ pub fn find_token(
         }
     }
 
-    // result.or_else(|| TokenInfo::try_new_defintion(word.to_owned(), archive, &document, start))
-    result
+    result.or_else(|| TokenInfo::try_new_definition(word.to_owned(), start, archive, file_id))
 }
 
 fn iterate_contender<'a>(
@@ -353,119 +349,127 @@ fn get_location(
     })
 }
 
+fn find_definition_declaration(
+    name: &str,
+    archive: &ProgramArchive,
+) -> Option<(TokenType, lsp_types::Location)> {
+    let definition_data = find_definition(name, archive)?;
+    let (token_type, file_id, start) = match definition_data {
+        DefinitionData::Template(x) => (
+            TokenType::Defintion(DefinitionType::Template),
+            x.get_file_id(),
+            x.get_param_location().start,
+        ),
+        DefinitionData::Function(x) => (
+            TokenType::Defintion(DefinitionType::Function),
+            x.get_file_id(),
+            x.get_param_location().start,
+        ),
+    };
+
+    // range is param location there fore length is not easily estimatable
+    Some((token_type, get_location(start..start, file_id, archive)?))
+}
+
 fn find_declaration(
     symbol: &str,
-    scope: &Scope,
+    scope: Option<&Scope>,
     archive: &ProgramArchive,
     file_id: usize,
 ) -> Option<(TokenType, lsp_types::Location)> {
-    let mut statements_or_expressions = vec![scope.body];
-    let result = loop {
-        let Some(statement_or_expression) = statements_or_expressions.pop() else {
-            break None
-        };
+    let result = match scope {
+        Some(scope) => {
+            let mut statements_or_expressions = vec![scope.body];
+            let result = loop {
+                let Some(statement_or_expression) = statements_or_expressions.pop() else {
+                    break None
+                };
 
-        let result = match statement_or_expression {
-            StatementOrExpression::Statement(x) => match x {
-                ast::Statement::Declaration {
-                    meta,
-                    xtype,
-                    name,
-                    dimensions,
-                    ..
-                } => {
-                    if symbol != name {
-                        continue;
-                    }
-                    let access = Access(
-                        dimensions
-                            .into_iter()
-                            .map(|e| match e {
-                                ast::Expression::Number(_, big_int) => Some(AccessType::Num(
-                                    big_int
-                                        .to_u32()
-                                        .expect("signal array length shouldnt be big"),
-                                )),
-                                ast::Expression::Variable { name, .. } => {
-                                    Some(AccessType::Var(name.to_owned()))
+                let result = match statement_or_expression {
+                    StatementOrExpression::Statement(x) => match x {
+                        ast::Statement::Declaration {
+                            meta,
+                            xtype,
+                            name,
+                            dimensions,
+                            ..
+                        } => {
+                            if symbol != name {
+                                continue;
+                            }
+                            let access = Access(
+                                dimensions
+                                    .into_iter()
+                                    .map(|e| match e {
+                                        ast::Expression::Number(_, big_int) => {
+                                            Some(AccessType::Num(
+                                                big_int
+                                                    .to_u32()
+                                                    .expect("signal array length shouldnt be big"),
+                                            ))
+                                        }
+                                        ast::Expression::Variable { name, .. } => {
+                                            Some(AccessType::Var(name.to_owned()))
+                                        }
+                                        _ => None,
+                                    })
+                                    .collect(),
+                            );
+
+                            let location = get_location(meta.start..meta.end, file_id, archive)
+                                .expect("find_declaration location should be valid");
+                            let token_type = match xtype {
+                                ast::VariableType::Var => TokenType::Variable(access),
+                                ast::VariableType::Signal(signal_type, tag_list) => {
+                                    TokenType::Signal(
+                                        access,
+                                        match signal_type {
+                                            ast::SignalType::Output => SignalType::Output,
+                                            ast::SignalType::Input => SignalType::Input,
+                                            ast::SignalType::Intermediate => {
+                                                SignalType::Intermediate
+                                            }
+                                        },
+                                        TagList(tag_list.clone()),
+                                    )
                                 }
-                                _ => None,
-                            })
-                            .collect(),
-                    );
+                                ast::VariableType::Component => TokenType::Component(access),
+                                ast::VariableType::AnonymousComponent => {
+                                    TokenType::Component(access)
+                                }
+                            };
 
-                    let location = get_location(meta.start..meta.end, file_id, archive)
-                        .expect("find_declaration location should be valid");
-                    let token_type = match xtype {
-                        ast::VariableType::Var => TokenType::Variable(access),
-                        ast::VariableType::Signal(signal_type, tag_list) => TokenType::Signal(
-                            access,
-                            match signal_type {
-                                ast::SignalType::Output => SignalType::Output,
-                                ast::SignalType::Input => SignalType::Input,
-                                ast::SignalType::Intermediate => SignalType::Intermediate,
-                            },
-                            TagList(tag_list.clone()),
-                        ),
-                        ast::VariableType::Component => TokenType::Component(access),
-                        ast::VariableType::AnonymousComponent => TokenType::Component(access),
-                    };
+                            Some((token_type, location))
+                        }
+                        _ => None,
+                    },
+                    _ => None,
+                };
 
-                    Some((token_type, location))
+                if result.is_some() {
+                    break result;
+                } else {
+                    statements_or_expressions.append(&mut get_next_statements_or_expression(
+                        statement_or_expression,
+                    ))
                 }
-                _ => None,
-            },
-            _ => None,
-        };
-
-        if result.is_some() {
-            break result;
-        } else {
-            statements_or_expressions.append(&mut get_next_statements_or_expression(
-                statement_or_expression,
-            ))
+            };
+            result.or_else(|| {
+                if scope.params.contains(&symbol.to_string()) {
+                    Some((
+                        TokenType::Variable(Access(vec![])),
+                        get_location(scope.params_location.clone(), file_id, archive)
+                            .expect("find_declaration location should be valid"),
+                    ))
+                } else {
+                    None
+                }
+            })
         }
+        _ => None,
     };
 
-    result
-        .or_else(|| {
-            if scope.params.contains(&symbol.to_string()) {
-                Some((
-                    TokenType::Variable(Access(vec![])),
-                    get_location(scope.params_location.clone(), file_id, archive)
-                        .expect("find_declaration location should be valid"),
-                ))
-            } else {
-                None
-            }
-        })
-        .or_else(|| {
-            /*
-            find_definition_type(symbol, archive)
-                .map(|x| (TokenType::Defintion(x), scope.params_location.clone()))
-            */
-
-            let definition_data = find_definition(symbol, archive)?;
-            let (token_type, file_id, start) = match definition_data {
-                DefinitionData::Template(x) => (
-                    TokenType::Defintion(DefinitionType::Template),
-                    x.get_file_id(),
-                    x.get_param_location().start,
-                ),
-                DefinitionData::Function(x) => (
-                    TokenType::Defintion(DefinitionType::Function),
-                    x.get_file_id(),
-                    x.get_param_location().start,
-                ),
-            };
-
-            // range is param location there fore length is not easily estimatable
-            Some((
-                token_type,
-                get_location(start..start, file_id, archive)
-                    .expect("find_declaration location should be valid"),
-            ))
-        })
+    result.or_else(|| find_definition_declaration(symbol, archive))
 }
 
 fn get_next_statements_or_expression(

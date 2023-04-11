@@ -400,6 +400,9 @@ impl LanguageServer for Backend {
         };
 
         // TODO: A better way to relate between URI and file_id
-        Ok(ast::find_token(pos, &word, archive.inner.file_id_main, archive).map(|x| x.to_goto_definition()))
+        Ok(
+            ast::find_token(pos, &word, archive.inner.file_id_main, archive)
+                .map(|x| x.to_goto_definition()),
+        )
     }
 }

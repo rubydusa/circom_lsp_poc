@@ -11,7 +11,8 @@
 
 - [ ] reimplement go to defintion (find decleration instead if symbol not a definition)
 - [ ] defintions should show params, templates show input and output signals
-- [ ] signals should show tag information and signal type
+- [x] signals should show tag information and signal type
+- [ ] component types should show what component are they assigned to
 
 ## Bugs
 - [x] resolve bug where things are shown as variable despite being signal

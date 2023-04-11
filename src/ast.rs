@@ -28,7 +28,7 @@ pub enum TokenType {
     Variable(Access),
     Signal(Access, SignalType, TagList),
     Component(Access),
-    Defintion(DefinitionType),
+    Definition(DefinitionType),
 }
 
 #[derive(Debug)]
@@ -69,8 +69,8 @@ pub struct Scope<'a> {
 }
 
 impl<'a> Scope<'a> {
-    fn new(defintion_data: DefinitionData<'a>) -> Scope<'a> {
-        let (body, params, params_location) = match defintion_data {
+    fn new(definition_data: DefinitionData<'a>) -> Scope<'a> {
+        let (body, params, params_location) = match definition_data {
             DefinitionData::Template(x) => (
                 StatementOrExpression::Statement(x.get_body()),
                 x.get_name_of_params(),
@@ -163,7 +163,7 @@ pub fn find_token(
     file_id: usize,
     archive: &ProgramArchive,
 ) -> Option<TokenInfo> {
-    let defintions = archive
+    let definitions = archive
         .inner
         .functions
         .values()
@@ -184,7 +184,7 @@ pub fn find_token(
         .collect::<Vec<_>>();
 
     let mut result = None;
-    'main: for definition in defintions {
+    'main: for definition in definitions {
         let mut contenders = vec![Contender::StatementOrExpression(definition.body)];
         'inner: loop {
             let Some(statement_or_expression) = contenders.pop() else {
@@ -356,12 +356,12 @@ fn find_definition_declaration(
     let definition_data = find_definition(name, archive)?;
     let (token_type, file_id, start) = match definition_data {
         DefinitionData::Template(x) => (
-            TokenType::Defintion(DefinitionType::Template),
+            TokenType::Definition(DefinitionType::Template),
             x.get_file_id(),
             x.get_param_location().start,
         ),
         DefinitionData::Function(x) => (
-            TokenType::Defintion(DefinitionType::Function),
+            TokenType::Definition(DefinitionType::Function),
             x.get_file_id(),
             x.get_param_location().start,
         ),
@@ -702,7 +702,7 @@ impl fmt::Display for TokenType {
                 write!(f, "Signal{} {} {}", access, signal_type, tag_list)
             }
             TokenType::Component(access) => write!(f, "Component{}", access),
-            TokenType::Defintion(defintion_type) => write!(f, "{}", defintion_type),
+            TokenType::Definition(definition_type) => write!(f, "{}", definition_type),
         }
     }
 }

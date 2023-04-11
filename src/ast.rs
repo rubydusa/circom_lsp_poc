@@ -59,13 +59,14 @@ pub struct TokenInfo {
     name: String,
     token_type: TokenType,
     location: lsp_types::Range,
+    declaration_location: lsp_types::Range,
     docs: Option<String>,
 }
 
 impl TokenInfo {
     pub fn new(
         name: String,
-        token_type: TokenType,
+        context: StatementOrExpression,
         meta: &ast::Meta,
         archive: &ProgramArchive,
         document: &Rope,
@@ -73,10 +74,13 @@ impl TokenInfo {
         let location = parse::char_range_to_position_range(document, meta.start..meta.end)
             .expect("unmatching document");
         let docs = get_docs(&name, archive);
+        let (token_type, declaration_location) = get_declaration(&name, context).expect("token should exist within context");
+        let declaration_location = parse::char_range_to_position_range(document, declaration_location).expect("unmatching document");
 
         TokenInfo {
             name,
             token_type,
+            declaration_location,
             location,
             docs,
         }
@@ -97,6 +101,7 @@ impl TokenInfo {
             TokenInfo {
                 name,
                 token_type: TokenType::Defintion(token_type),
+                declaration_location: location,
                 location,
                 docs,
             }
@@ -201,19 +206,10 @@ fn iterate_contender<'a>(
                 return Err(vec![]);
             }
 
-            let token_type = match statement_or_expression {
+            let is_match = match statement_or_expression {
                 StatementOrExpression::Statement(statement) => match statement {
                     ast::Statement::Declaration { name, .. } => {
-                        if name == word {
-                            // TODO: take into account declaration location
-                            Some(
-                                get_declaration(word, context)
-                                    .expect("declaration should exist")
-                                    .0,
-                            )
-                        } else {
-                            None
-                        }
+                        name == word
                     }
                     ast::Statement::Substitution {
                         var,
@@ -249,63 +245,48 @@ fn iterate_contender<'a>(
                             };
                             contenders.push(Contender::Contender(TokenInfo::new(
                                 word.to_owned(),
-                                token_type,
+                                context,
                                 meta,
                                 archive,
                                 document,
                             )));
                         }
-                        None
+                        false
                     }
-                    _ => None,
+                    _ => false,
                 },
                 StatementOrExpression::Expression(expression) => match expression {
                     ast::Expression::Variable { name, .. } => {
                         // TODO (maybe): exception for template and function params?
-                        if word == name {
-                            // TODO: add declaration location
-                            Some(
-                                get_declaration(word, context)
-                                    .expect("declaration should exist")
-                                    .0,
-                            )
-                        } else {
-                            None
-                        }
+                        word == name
                     }
                     ast::Expression::Call { id, .. } => {
                         // order matters here
                         if id == word {
                             contenders.push(Contender::Contender(TokenInfo::new(
                                 word.to_owned(),
-                                TokenType::Defintion(
-                                    find_definition_type(word, archive)
-                                        .expect("call should have valid defintion"),
-                                ),
+                                context,
                                 meta,
                                 archive,
                                 document,
                             )));
                         }
-                        None
+                        false
                     }
                     ast::Expression::AnonymousComp { id, .. } => {
                         // order matters here
                         if id == word {
                             contenders.push(Contender::Contender(TokenInfo::new(
                                 word.to_owned(),
-                                TokenType::Defintion(
-                                    find_definition_type(word, archive)
-                                        .expect("call should have valid definiton"),
-                                ),
+                                context,
                                 meta,
                                 archive,
                                 document,
                             )));
                         }
-                        None
+                        false
                     }
-                    _ => None,
+                    _ => false,
                 },
             };
 
@@ -316,10 +297,10 @@ fn iterate_contender<'a>(
                     .collect(),
             );
 
-            if let Some(token_type) = token_type {
+            if is_match {
                 Ok(TokenInfo::new(
                     word.to_owned(),
-                    token_type,
+                    context,
                     meta,
                     archive,
                     document,

@@ -19,7 +19,8 @@
 - [ ] hover not showing in return statements
 - [ ] hover not showing in accesses
 - [x] definition gets docs of definition above it if it is single line comments
-- [ ] access signature of symbol should be derived only from its declaration, not any expression/ statement that includes access information
+- [x] access signature of symbol should be derived only from its declaration, not any expression/ statement that includes access information
+- [ ] token type not foundable if template/function variable because there is no declaration
 
 ## Miscellaneous
 - [x] rename StatementOrExpression to something more appropriate

@@ -213,36 +213,10 @@ fn iterate_contender<'a>(
                     }
                     ast::Statement::Substitution {
                         var,
-                        op,
-                        rhe,
-                        access,
                         ..
                     } => {
                         // order matters here
                         if var == word {
-                            let access = generate_access(access);
-                            let token_type = match op {
-                                ast::AssignOp::AssignVar => match rhe {
-                                    ast::Expression::AnonymousComp { .. } => {
-                                        TokenType::Component(access)
-                                    }
-                                    ast::Expression::Call { id, .. } => {
-                                        match find_definition_type(id, archive)
-                                            .expect("call should have valid defintion")
-                                        {
-                                            DefinitionType::Template => {
-                                                TokenType::Component(access)
-                                            }
-                                            DefinitionType::Function => TokenType::Variable(access),
-                                        }
-                                    }
-                                    _ => TokenType::Variable(access),
-                                },
-                                ast::AssignOp::AssignSignal
-                                | ast::AssignOp::AssignConstraintSignal => {
-                                    TokenType::Signal(access)
-                                }
-                            };
                             contenders.push(Contender::Contender(TokenInfo::new(
                                 word.to_owned(),
                                 context,

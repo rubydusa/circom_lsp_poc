@@ -12,57 +12,73 @@ use std::fmt;
 use crate::parse;
 use crate::wrappers::*;
 
-pub enum Contender<'a> {
-    StatementOrExpression(StatementOrExpression<'a>),
-    Contender(TokenInfo),
+pub struct TokenInfo {
+    name: String,
+    token_type: TokenType,
+    range: lsp_types::Range,
+    declaration_location: lsp_types::Location,
+    docs: Option<String>,
 }
 
-#[derive(Clone, Copy)]
-pub enum StatementOrExpression<'a> {
-    Statement(&'a ast::Statement),
-    Expression(&'a ast::Expression),
+impl TokenInfo {
+    pub fn to_hover(&self) -> lsp_types::Hover {
+        let range = Some(self.range.clone());
+        let contents =
+            lsp_types::HoverContents::Scalar(lsp_types::MarkedString::String(format!("{}", &self)));
+
+        lsp_types::Hover { range, contents }
+    }
+
+    pub fn to_goto_definition(&self) -> lsp_types::GotoDefinitionResponse {
+        lsp_types::GotoDefinitionResponse::Scalar(self.declaration_location.clone())
+    }
+
+    fn new(
+        name: String,
+        scope: &Scope,
+        range: std::ops::Range<usize>,
+        archive: &ProgramArchive,
+        file_id: usize,
+    ) -> TokenInfo {
+        let lsp_types::Location { range, .. } =
+            get_location(range, file_id, archive).expect("unmatching document");
+        let docs = get_docs(&name, archive);
+        let (token_type, declaration_location) =
+            find_declaration(&name, Some(scope), archive, file_id)
+                .expect(&format!("token should exist in scope: {}", name));
+
+        TokenInfo {
+            name,
+            token_type,
+            declaration_location,
+            range,
+            docs,
+        }
+    }
+
+    fn try_new_definition(
+        name: String,
+        start: usize,
+        archive: &ProgramArchive,
+        file_id: usize,
+    ) -> Option<TokenInfo> {
+        let lsp_types::Location { range, .. } =
+            get_location(start..(start + name.len()), file_id, archive)
+                .expect("unmatching document");
+        let docs = get_docs(&name, archive);
+        let (token_type, declaration_location) = find_declaration(&name, None, archive, file_id)?;
+
+        Some(TokenInfo {
+            name,
+            token_type,
+            declaration_location,
+            range,
+            docs,
+        })
+    }
 }
 
-#[derive(Debug)]
-pub enum TokenType {
-    Variable(Access),
-    Signal(Access, SignalType, TagList),
-    Component(Access),
-    Definition(DefinitionType, Vec<String>),
-}
-
-#[derive(Debug)]
-pub enum SignalType {
-    Output,
-    Input,
-    Intermediate,
-}
-
-#[derive(Debug)]
-pub struct TagList(Vec<String>);
-
-#[derive(Debug)]
-pub enum DefinitionType {
-    Template,
-    Function,
-}
-
-#[derive(Debug)]
-pub struct Access(Vec<Option<AccessType>>);
-
-#[derive(Debug)]
-pub enum AccessType {
-    Num(u32),
-    Var(String),
-}
-
-#[derive(Clone, Copy)]
-pub enum DefinitionData<'a> {
-    Template(&'a TemplateData),
-    Function(&'a FunctionData),
-}
-
-pub struct Scope<'a> {
+struct Scope<'a> {
     body: StatementOrExpression<'a>,
     params: &'a Vec<String>,
     params_location: std::ops::Range<usize>,
@@ -91,70 +107,47 @@ impl<'a> Scope<'a> {
     }
 }
 
-pub struct TokenInfo {
-    name: String,
-    token_type: TokenType,
-    range: lsp_types::Range,
-    declaration_location: lsp_types::Location,
-    docs: Option<String>,
+struct TagList(Vec<String>);
+
+struct Access(Vec<Option<AccessType>>);
+
+enum Contender<'a> {
+    StatementOrExpression(StatementOrExpression<'a>),
+    Contender(TokenInfo),
 }
 
-impl TokenInfo {
-    pub fn new(
-        name: String,
-        scope: &Scope,
-        range: std::ops::Range<usize>,
-        archive: &ProgramArchive,
-        file_id: usize,
-    ) -> TokenInfo {
-        let lsp_types::Location { range, .. } =
-            get_location(range, file_id, archive).expect("unmatching document");
-        let docs = get_docs(&name, archive);
-        let (token_type, declaration_location) =
-            find_declaration(&name, Some(scope), archive, file_id)
-                .expect(&format!("token should exist in scope: {}", name));
+#[derive(Clone, Copy)]
+enum StatementOrExpression<'a> {
+    Statement(&'a ast::Statement),
+    Expression(&'a ast::Expression),
+}
 
-        TokenInfo {
-            name,
-            token_type,
-            declaration_location,
-            range,
-            docs,
-        }
-    }
+enum TokenType {
+    Variable(Access),
+    Signal(Access, SignalType, TagList),
+    Component(Access),
+    Definition(DefinitionType, Vec<String>),
+}
 
-    pub fn try_new_definition(
-        name: String,
-        start: usize,
-        archive: &ProgramArchive,
-        file_id: usize,
-    ) -> Option<TokenInfo> {
-        let lsp_types::Location { range, .. } =
-            get_location(start..(start + name.len()), file_id, archive)
-                .expect("unmatching document");
-        let docs = get_docs(&name, archive);
-        let (token_type, declaration_location) = find_declaration(&name, None, archive, file_id)?;
+enum SignalType {
+    Output,
+    Input,
+    Intermediate,
+}
 
-        Some(TokenInfo {
-            name,
-            token_type,
-            declaration_location,
-            range,
-            docs,
-        })
-    }
+enum DefinitionType {
+    Template,
+    Function,
+}
 
-    pub fn to_hover(&self) -> lsp_types::Hover {
-        let range = Some(self.range.clone());
-        let contents =
-            lsp_types::HoverContents::Scalar(lsp_types::MarkedString::String(format!("{}", &self)));
+enum AccessType {
+    Num(u32),
+    Var(String),
+}
 
-        lsp_types::Hover { range, contents }
-    }
-
-    pub fn to_goto_definition(&self) -> lsp_types::GotoDefinitionResponse {
-        lsp_types::GotoDefinitionResponse::Scalar(self.declaration_location.clone())
-    }
+enum DefinitionData<'a> {
+    Template(&'a TemplateData),
+    Function(&'a FunctionData),
 }
 
 pub fn find_token(
@@ -305,72 +298,6 @@ fn iterate_contender<'a>(
     }
 }
 
-fn get_docs(name: &str, archive: &ProgramArchive) -> Option<String> {
-    let definition = find_definition(name, archive)?;
-    let (file_id, start) = match definition {
-        DefinitionData::Template(data) => (data.get_file_id(), data.get_param_location().start),
-        DefinitionData::Function(data) => (data.get_file_id(), data.get_param_location().start),
-    };
-    let file = archive
-        .inner
-        .file_library
-        .to_storage()
-        .get(file_id)
-        .expect("file_id of definition should be valid");
-    let content = Rope::from_str(file.source());
-
-    parse::read_comment(&content, start)
-}
-
-fn find_definition<'a>(name: &str, archive: &'a ProgramArchive) -> Option<DefinitionData<'a>> {
-    if let Some(template_data) = archive.inner.templates.get(name) {
-        Some(DefinitionData::Template(template_data))
-    } else if let Some(function_data) = archive.inner.functions.get(name) {
-        Some(DefinitionData::Function(function_data))
-    } else {
-        None
-    }
-}
-
-fn get_location(
-    range: std::ops::Range<usize>,
-    file_id: usize,
-    archive: &ProgramArchive,
-) -> Option<lsp_types::Location> {
-    let simple_file = archive.inner.file_library.to_storage().get(file_id)?;
-
-    let uri = parse::string_to_uri(simple_file.name());
-    let source = simple_file.source();
-
-    let document = Rope::from_str(source);
-    Some(lsp_types::Location {
-        uri,
-        range: parse::char_range_to_position_range(&document, range).ok()?,
-    })
-}
-
-fn find_definition_declaration(
-    name: &str,
-    archive: &ProgramArchive,
-) -> Option<(TokenType, lsp_types::Location)> {
-    let definition_data = find_definition(name, archive)?;
-    let (token_type, file_id, start) = match definition_data {
-        DefinitionData::Template(x) => (
-            TokenType::Definition(DefinitionType::Template, x.get_name_of_params().clone()),
-            x.get_file_id(),
-            x.get_param_location().start,
-        ),
-        DefinitionData::Function(x) => (
-            TokenType::Definition(DefinitionType::Function, x.get_name_of_params().clone()),
-            x.get_file_id(),
-            x.get_param_location().start,
-        ),
-    };
-
-    // range is param location there fore length is not easily estimatable
-    Some((token_type, get_location(start..start, file_id, archive)?))
-}
-
 fn find_declaration(
     symbol: &str,
     scope: Option<&Scope>,
@@ -470,6 +397,72 @@ fn find_declaration(
     };
 
     result.or_else(|| find_definition_declaration(symbol, archive))
+}
+
+fn get_docs(name: &str, archive: &ProgramArchive) -> Option<String> {
+    let definition = find_definition(name, archive)?;
+    let (file_id, start) = match definition {
+        DefinitionData::Template(data) => (data.get_file_id(), data.get_param_location().start),
+        DefinitionData::Function(data) => (data.get_file_id(), data.get_param_location().start),
+    };
+    let file = archive
+        .inner
+        .file_library
+        .to_storage()
+        .get(file_id)
+        .expect("file_id of definition should be valid");
+    let content = Rope::from_str(file.source());
+
+    parse::read_comment(&content, start)
+}
+
+fn find_definition<'a>(name: &str, archive: &'a ProgramArchive) -> Option<DefinitionData<'a>> {
+    if let Some(template_data) = archive.inner.templates.get(name) {
+        Some(DefinitionData::Template(template_data))
+    } else if let Some(function_data) = archive.inner.functions.get(name) {
+        Some(DefinitionData::Function(function_data))
+    } else {
+        None
+    }
+}
+
+fn find_definition_declaration(
+    name: &str,
+    archive: &ProgramArchive,
+) -> Option<(TokenType, lsp_types::Location)> {
+    let definition_data = find_definition(name, archive)?;
+    let (token_type, file_id, start) = match definition_data {
+        DefinitionData::Template(x) => (
+            TokenType::Definition(DefinitionType::Template, x.get_name_of_params().clone()),
+            x.get_file_id(),
+            x.get_param_location().start,
+        ),
+        DefinitionData::Function(x) => (
+            TokenType::Definition(DefinitionType::Function, x.get_name_of_params().clone()),
+            x.get_file_id(),
+            x.get_param_location().start,
+        ),
+    };
+
+    // range is param location there fore length is not easily estimatable
+    Some((token_type, get_location(start..start, file_id, archive)?))
+}
+
+fn get_location(
+    range: std::ops::Range<usize>,
+    file_id: usize,
+    archive: &ProgramArchive,
+) -> Option<lsp_types::Location> {
+    let simple_file = archive.inner.file_library.to_storage().get(file_id)?;
+
+    let uri = parse::string_to_uri(simple_file.name());
+    let source = simple_file.source();
+
+    let document = Rope::from_str(source);
+    Some(lsp_types::Location {
+        uri,
+        range: parse::char_range_to_position_range(&document, range).ok()?,
+    })
 }
 
 fn get_next_statements_or_expression(

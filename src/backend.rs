@@ -80,12 +80,12 @@ impl Backend {
 
             let file_library = match &file_library_source {
                 FileLibrarySource::ProgramArchive(archive) => &archive.inner.file_library,
-                FileLibrarySource::FileLibrary(file_library) => &file_library,
+                FileLibrarySource::FileLibrary(file_library) => file_library,
             };
 
             let diagnostics: Vec<_> = reports
                 .into_iter()
-                .map(|x| Self::report_to_diagnostic(x, &file_library, &params.uri))
+                .map(|x| Self::report_to_diagnostic(x, file_library, &params.uri))
                 .collect();
 
             let mut main_file_diags = Vec::new();
@@ -336,19 +336,16 @@ impl LanguageServer for Backend {
                 .map(|x| x.content.to_string())
         };
 
-        match result {
-            Some(document) => {
-                self.on_change(
-                    TextDocumentItem {
-                        uri: params.text_document.uri,
-                        text: document,
-                        version: None,
-                    },
-                    true,
-                )
-                .await;
-            }
-            None => (),
+        if let Some(document) = result {
+            self.on_change(
+                TextDocumentItem {
+                    uri: params.text_document.uri,
+                    text: document,
+                    version: None,
+                },
+                true,
+            )
+            .await;
         };
     }
 

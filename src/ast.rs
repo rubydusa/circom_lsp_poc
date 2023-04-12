@@ -22,7 +22,7 @@ pub struct TokenInfo {
 
 impl TokenInfo {
     pub fn to_hover(&self) -> lsp_types::Hover {
-        let range = Some(self.range.clone());
+        let range = Some(self.range);
         let contents =
             lsp_types::HoverContents::Scalar(lsp_types::MarkedString::String(format!("{}", &self)));
 
@@ -45,7 +45,7 @@ impl TokenInfo {
         let docs = get_docs(&name, archive);
         let (token_type, declaration_location) =
             find_declaration(&name, Some(scope), archive, file_id)
-                .expect(&format!("token should exist in scope: {}", name));
+                .unwrap_or_else(|| panic!("token should exist in scope: {}", name));
 
         TokenInfo {
             name,
@@ -313,63 +313,52 @@ fn find_declaration(
                 };
 
                 let result = match statement_or_expression {
-                    StatementOrExpression::Statement(x) => match x {
-                        ast::Statement::Declaration {
-                            meta,
-                            xtype,
-                            name,
-                            dimensions,
-                            ..
-                        } => {
-                            if symbol != name {
-                                continue;
-                            }
-                            let access = Access(
-                                dimensions
-                                    .into_iter()
-                                    .map(|e| match e {
-                                        ast::Expression::Number(_, big_int) => {
-                                            Some(AccessType::Num(
-                                                big_int
-                                                    .to_u32()
-                                                    .expect("signal array length shouldnt be big"),
-                                            ))
-                                        }
-                                        ast::Expression::Variable { name, .. } => {
-                                            Some(AccessType::Var(name.to_owned()))
-                                        }
-                                        _ => None,
-                                    })
-                                    .collect(),
-                            );
-
-                            let location = get_location(meta.start..meta.end, file_id, archive)
-                                .expect("find_declaration location should be valid");
-                            let token_type = match xtype {
-                                ast::VariableType::Var => TokenType::Variable(access),
-                                ast::VariableType::Signal(signal_type, tag_list) => {
-                                    TokenType::Signal(
-                                        access,
-                                        match signal_type {
-                                            ast::SignalType::Output => SignalType::Output,
-                                            ast::SignalType::Input => SignalType::Input,
-                                            ast::SignalType::Intermediate => {
-                                                SignalType::Intermediate
-                                            }
-                                        },
-                                        TagList(tag_list.clone()),
-                                    )
-                                }
-                                ast::VariableType::Component => TokenType::Component(access),
-                                ast::VariableType::AnonymousComponent => {
-                                    TokenType::Component(access)
-                                }
-                            };
-
-                            Some((token_type, location))
+                    StatementOrExpression::Statement(ast::Statement::Declaration {
+                        meta,
+                        xtype,
+                        name,
+                        dimensions,
+                        ..
+                    }) => {
+                        if symbol != name {
+                            continue;
                         }
-                        _ => None,
-                    },
+                        let access = Access(
+                            dimensions
+                                .iter()
+                                .map(|e| match e {
+                                    ast::Expression::Number(_, big_int) => Some(AccessType::Num(
+                                        big_int
+                                            .to_u32()
+                                            .expect("signal array length shouldnt be big"),
+                                    )),
+                                    ast::Expression::Variable { name, .. } => {
+                                        Some(AccessType::Var(name.to_owned()))
+                                    }
+                                    _ => None,
+                                })
+                                .collect(),
+                        );
+
+                        let location = get_location(meta.start..meta.end, file_id, archive)
+                            .expect("find_declaration location should be valid");
+                        let token_type = match xtype {
+                            ast::VariableType::Var => TokenType::Variable(access),
+                            ast::VariableType::Signal(signal_type, tag_list) => TokenType::Signal(
+                                access,
+                                match signal_type {
+                                    ast::SignalType::Output => SignalType::Output,
+                                    ast::SignalType::Input => SignalType::Input,
+                                    ast::SignalType::Intermediate => SignalType::Intermediate,
+                                },
+                                TagList(tag_list.clone()),
+                            ),
+                            ast::VariableType::Component => TokenType::Component(access),
+                            ast::VariableType::AnonymousComponent => TokenType::Component(access),
+                        };
+
+                        Some((token_type, location))
+                    }
                     _ => None,
                 };
 
@@ -419,10 +408,12 @@ fn get_docs(name: &str, archive: &ProgramArchive) -> Option<String> {
 fn find_definition<'a>(name: &str, archive: &'a ProgramArchive) -> Option<DefinitionData<'a>> {
     if let Some(template_data) = archive.inner.templates.get(name) {
         Some(DefinitionData::Template(template_data))
-    } else if let Some(function_data) = archive.inner.functions.get(name) {
-        Some(DefinitionData::Function(function_data))
     } else {
-        None
+        archive
+            .inner
+            .functions
+            .get(name)
+            .map(DefinitionData::Function)
     }
 }
 
@@ -479,14 +470,14 @@ fn get_next_statements_or_expression(
                 ..
             } => {
                 statements_or_expressions.push(StatementOrExpression::Expression(cond));
-                statements_or_expressions.push(StatementOrExpression::Statement(&if_case));
+                statements_or_expressions.push(StatementOrExpression::Statement(if_case));
                 if let Some(else_case) = else_case {
-                    statements_or_expressions.push(StatementOrExpression::Statement(&else_case));
+                    statements_or_expressions.push(StatementOrExpression::Statement(else_case));
                 }
             }
             ast::Statement::While { cond, stmt, .. } => {
                 statements_or_expressions.push(StatementOrExpression::Expression(cond));
-                statements_or_expressions.push(StatementOrExpression::Statement(&stmt));
+                statements_or_expressions.push(StatementOrExpression::Statement(stmt));
             }
             ast::Statement::Return { value, .. } => {
                 statements_or_expressions.push(StatementOrExpression::Expression(value));
@@ -496,23 +487,23 @@ fn get_next_statements_or_expression(
             } => {
                 statements_or_expressions.append(
                     &mut initializations
-                        .into_iter()
-                        .map(|x| StatementOrExpression::Statement(x))
+                        .iter()
+                        .map(StatementOrExpression::Statement)
                         .collect(),
                 );
             }
             ast::Statement::Declaration { dimensions, .. } => {
                 statements_or_expressions.append(
                     &mut dimensions
-                        .into_iter()
-                        .map(|x| StatementOrExpression::Expression(x))
+                        .iter()
+                        .map(StatementOrExpression::Expression)
                         .collect(),
                 );
             }
             ast::Statement::Substitution { rhe, access, .. } => {
                 statements_or_expressions.append(
                     &mut access
-                        .into_iter()
+                        .iter()
                         .filter_map(|x| match x {
                             ast::Access::ArrayAccess(e) => {
                                 Some(StatementOrExpression::Expression(e))
@@ -536,7 +527,7 @@ fn get_next_statements_or_expression(
             }
             ast::Statement::LogCall { args, .. } => {
                 let mut args_processed = args
-                    .into_iter()
+                    .iter()
                     .filter_map(|x| match x {
                         ast::LogArgument::LogExp(exp) => {
                             Some(StatementOrExpression::Expression(exp))
@@ -548,12 +539,8 @@ fn get_next_statements_or_expression(
                 statements_or_expressions.append(&mut args_processed);
             }
             ast::Statement::Block { stmts, .. } => {
-                statements_or_expressions.append(
-                    &mut stmts
-                        .into_iter()
-                        .map(|x| StatementOrExpression::Statement(x))
-                        .collect(),
-                );
+                statements_or_expressions
+                    .append(&mut stmts.iter().map(StatementOrExpression::Statement).collect());
             }
             ast::Statement::Assert { arg, .. } => {
                 statements_or_expressions.push(StatementOrExpression::Expression(arg));
@@ -583,7 +570,7 @@ fn get_next_statements_or_expression(
             ast::Expression::Variable { access, .. } => {
                 statements_or_expressions.append(
                     &mut access
-                        .into_iter()
+                        .iter()
                         .filter_map(|x| match x {
                             ast::Access::ArrayAccess(e) => {
                                 Some(StatementOrExpression::Expression(e))
@@ -594,10 +581,8 @@ fn get_next_statements_or_expression(
                 );
             }
             ast::Expression::Call { args, .. } => {
-                let mut args_processed = args
-                    .into_iter()
-                    .map(|x| StatementOrExpression::Expression(x))
-                    .collect();
+                let mut args_processed =
+                    args.iter().map(StatementOrExpression::Expression).collect();
 
                 statements_or_expressions.append(&mut args_processed);
             }
@@ -605,12 +590,12 @@ fn get_next_statements_or_expression(
                 params, signals, ..
             } => {
                 let mut params_processed = params
-                    .into_iter()
-                    .map(|x| StatementOrExpression::Expression(x))
+                    .iter()
+                    .map(StatementOrExpression::Expression)
                     .collect();
                 let mut signals_processed = signals
-                    .into_iter()
-                    .map(|x| StatementOrExpression::Expression(x))
+                    .iter()
+                    .map(StatementOrExpression::Expression)
                     .collect();
 
                 statements_or_expressions.append(&mut params_processed);
@@ -618,16 +603,16 @@ fn get_next_statements_or_expression(
             }
             ast::Expression::ArrayInLine { values, .. } => {
                 let mut values_processed = values
-                    .into_iter()
-                    .map(|x| StatementOrExpression::Expression(x))
+                    .iter()
+                    .map(StatementOrExpression::Expression)
                     .collect();
 
                 statements_or_expressions.append(&mut values_processed);
             }
             ast::Expression::Tuple { values, .. } => {
                 let mut values_processed = values
-                    .into_iter()
-                    .map(|x| StatementOrExpression::Expression(x))
+                    .iter()
+                    .map(StatementOrExpression::Expression)
                     .collect();
 
                 statements_or_expressions.append(&mut values_processed);
@@ -645,7 +630,7 @@ fn get_next_statements_or_expression(
     statements_or_expressions
 }
 
-fn get_meta<'a>(statement_or_expression: StatementOrExpression<'a>) -> &'a ast::Meta {
+fn get_meta(statement_or_expression: StatementOrExpression) -> &ast::Meta {
     match statement_or_expression {
         StatementOrExpression::Statement(x) => match x {
             ast::Statement::IfThenElse { meta, .. } => meta,

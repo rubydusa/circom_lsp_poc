@@ -23,8 +23,8 @@ pub fn read_multiline_comment(content: &Rope, start: usize) -> Option<String> {
     let mut start_idx = 0;
     let mut end_idx = 0;
 
-    let mut iter = content.chars_at(start).reversed();
-    while let Some(c) = iter.next() {
+    let iter = content.chars_at(start).reversed();
+    for c in iter {
         match current_state {
             CommentParserState::Outside => match c {
                 '/' => current_state = CommentParserState::MaybeInside,
@@ -46,24 +46,25 @@ pub fn read_multiline_comment(content: &Rope, start: usize) -> Option<String> {
                 '*' => end_idx = current_idx,
                 _ => current_state = CommentParserState::Inside,
             },
-            CommentParserState::Inside => match c {
-                '*' => {
+            CommentParserState::Inside => {
+                if let '*' = c {
                     current_state = CommentParserState::MaybeOutside;
                     start_idx = current_idx;
                 }
-                _ => (),
-            },
+            }
             CommentParserState::MaybeOutside => match c {
                 '/' => {
-                    let result = content
-                        .slice(start_idx..end_idx - 1)
-                        .to_string()
-                        .lines()
-                        .map(|x| x.trim_matches(|c: char| c.is_whitespace() || c == '*'))
-                        .intersperse("\n")
-                        .collect::<String>()
-                        .trim()
-                        .to_string();
+                    let result = Itertools::intersperse(
+                        content
+                            .slice(start_idx..end_idx - 1)
+                            .to_string()
+                            .lines()
+                            .map(|x| x.trim_matches(|c: char| c.is_whitespace() || c == '*')),
+                        "\n",
+                    )
+                    .collect::<String>()
+                    .trim()
+                    .to_string();
 
                     return if !result.is_empty() {
                         Some(result)
@@ -99,7 +100,7 @@ pub fn read_multi_singleline_comment(content: &Rope, start: usize) -> Option<Str
             let trimmed = as_string.trim();
 
             let starts_as_comment = trimmed.len() >= 2 && &trimmed[0..2] == "//";
-            let suspicious = trimmed.ends_with("}") || trimmed.ends_with(";");
+            let suspicious = trimmed.ends_with('}') || trimmed.ends_with(';');
 
             starts_as_comment || {
                 if suspicious {
@@ -126,15 +127,17 @@ pub fn read_multi_singleline_comment(content: &Rope, start: usize) -> Option<Str
     if entered {
         let start = content.line_to_char(first_comment_line);
         let end = content.line_to_char(last_comment_line + 1);
-        let result = content
-            .slice(start..end)
-            .to_string()
-            .lines()
-            .map(|x| x.trim_matches(|c: char| c.is_whitespace() || c == '/'))
-            .intersperse("\n")
-            .collect::<String>()
-            .trim()
-            .to_string();
+        let result = Itertools::intersperse(
+            content
+                .slice(start..end)
+                .to_string()
+                .lines()
+                .map(|x| x.trim_matches(|c: char| c.is_whitespace() || c == '/')),
+            "\n",
+        )
+        .collect::<String>()
+        .trim()
+        .to_string();
 
         Some(result)
     } else {
@@ -149,25 +152,25 @@ pub fn find_word(rope: &Rope, position: Position) -> ropey::Result<Option<(usize
         .expect("char_idx should not be out of range since position_to_char guarantees");
 
     if char.is_alphanumeric() {
-        let start = 'start: loop {
+        let start = {
             let mut i = char_idx;
             for c in rope.chars_at(char_idx).reversed() {
                 if !c.is_alphanumeric() && c != '_' {
-                    break 'start i;
+                    break;
                 }
                 i -= 1;
             }
-            break i;
+            i
         };
-        let end = 'end: loop {
+        let end = {
             let mut i = char_idx;
             for c in rope.chars_at(char_idx) {
                 if !c.is_alphanumeric() && c != '_' {
-                    break 'end i;
+                    break;
                 }
                 i += 1;
             }
-            break i;
+            i
         };
 
         Ok(Some((start, rope.slice(start..end).to_string())))
@@ -228,8 +231,8 @@ pub fn string_to_uri(s: &str) -> Url {
 }
 
 pub fn simple_hover(message: String) -> Hover {
-    return Hover {
+    Hover {
         contents: HoverContents::Scalar(MarkedString::String(message)),
         range: None,
-    };
+    }
 }

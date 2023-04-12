@@ -10,7 +10,7 @@
 - [x] prettier hover messages
 
 - [x] reimplement go to defintion (find decleration instead if symbol not a definition)
-- [ ] defintions should show params, templates show input and output signals
+- [x] defintions should show params
 - [x] signals should show tag information and signal type
 - [ ] component types should show what component are they assigned to
 

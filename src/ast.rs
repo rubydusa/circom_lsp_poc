@@ -28,7 +28,7 @@ pub enum TokenType {
     Variable(Access),
     Signal(Access, SignalType, TagList),
     Component(Access),
-    Definition(DefinitionType),
+    Definition(DefinitionType, Vec<String>),
 }
 
 #[derive(Debug)]
@@ -356,12 +356,12 @@ fn find_definition_declaration(
     let definition_data = find_definition(name, archive)?;
     let (token_type, file_id, start) = match definition_data {
         DefinitionData::Template(x) => (
-            TokenType::Definition(DefinitionType::Template),
+            TokenType::Definition(DefinitionType::Template, x.get_name_of_params().clone()),
             x.get_file_id(),
             x.get_param_location().start,
         ),
         DefinitionData::Function(x) => (
-            TokenType::Definition(DefinitionType::Function),
+            TokenType::Definition(DefinitionType::Function, x.get_name_of_params().clone()),
             x.get_file_id(),
             x.get_param_location().start,
         ),
@@ -702,7 +702,9 @@ impl fmt::Display for TokenType {
                 write!(f, "Signal{} {} {}", access, signal_type, tag_list)
             }
             TokenType::Component(access) => write!(f, "Component{}", access),
-            TokenType::Definition(definition_type) => write!(f, "{}", definition_type),
+            TokenType::Definition(definition_type, params) => {
+                write!(f, "{}({})", definition_type, params.join(", "))
+            }
         }
     }
 }
